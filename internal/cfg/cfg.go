@@ -65,10 +65,8 @@ func (p Paths) Ensure() error {
 		if err := os.MkdirAll(d.path, d.mode); err != nil {
 			return err
 		}
-		// MkdirAll leaves an already-existing directory untouched.
-		if d.path == p.CertDir {
-			_ = os.Chmod(d.path, 0o700)
-		}
+		// MkdirAll leaves an already-existing directory at its old mode.
+		_ = os.Chmod(d.path, d.mode)
 	}
 	return nil
 }
@@ -80,12 +78,14 @@ func Layout() (Paths, error) {
 		return Paths{}, err
 	}
 	return Paths{
-		Home:    home,
-		Bin:     filepath.Join(home, "bin"),
-		Cache:   filepath.Join(home, "cache"),
-		Work:    filepath.Join(home, "work"),
-		Run:     filepath.Join(home, "run"),
-		CertDir: filepath.Join(home, "certs"),
+		Home:  home,
+		Bin:   filepath.Join(home, "bin"),
+		Cache: filepath.Join(home, "cache"),
+		Work:  filepath.Join(home, "work"),
+		Run:   filepath.Join(home, "run"),
+		// The engine writes its CA and key under <workdir>/certs; this is that
+		// directory, not a wxdl-private one, so the path has to match.
+		CertDir: filepath.Join(home, "work", "certs"),
 	}, nil
 }
 

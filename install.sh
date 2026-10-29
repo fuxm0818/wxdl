@@ -46,6 +46,10 @@ done
 # A copy downloaded by a browser carries the quarantine flag, which makes the
 # engine fail to launch with an unhelpful Gatekeeper error.
 xattr -d com.apple.quarantine "$home/.wxdl/bin/wxdl" 2>/dev/null || true
+for f in "$home/.wxdl/vendor"/*; do
+	[ -e "$f" ] || continue
+	xattr -d com.apple.quarantine "$f" 2>/dev/null || true
+done
 
 wxdl="$home/.wxdl/bin/wxdl"
 

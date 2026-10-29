@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fuxm0818/wxdl/internal/cfg"
@@ -45,6 +46,11 @@ type Session struct {
 
 	cli  *server.Client
 	proc *server.Process
+
+	// unlock releases the single-instance lock taken by Prepare.
+	unlock func()
+	// mu serialises rollback between the run, --keep and a Ctrl-C handler.
+	mu sync.Mutex
 }
 
 // New loads configuration, creates ~/.wxdl and resolves the download dir.
@@ -108,6 +114,14 @@ func (s *Session) Prepare() error {
 	if runtime.GOOS != "darwin" {
 		return errors.New("wxdl 目前只支持 macOS：视频号的播放地址需要微信 macOS 客户端的登录状态")
 	}
+	release, err := s.lockInstance()
+	if err != nil {
+		return err
+	}
+	// The lock is kept for the whole capture session and released by Restore, so
+	// two simultaneous runs cannot fight over the system proxy or kill each
+	// other's engine. A process that dies still releases it.
+	s.unlock = release
 	s.Service = sysinfo.PrimaryService()
 	if s.Service == "" {
 		return errors.New("没有识别到正在使用的网络服务，请确认本机已连接 Wi-Fi 或有线网络")
@@ -148,7 +162,7 @@ func (s *Session) Prepare() error {
 		}
 		s.State = st
 		if !sysinfo.CertTrusted(certFile) {
-			return fmt.Errorf("证书已安装但系统仍不信任它，请在「钥匙串访问」里检查 %s", s.Cfg.CAName)
+			return fmt.Errorf("证书已安装但系统仍不信任它，请在「钥匙串访问」里检查 %s（wxdl undo 可恢复代理）", s.Cfg.CAName)
 		}
 	}
 	if err := s.persist(); err != nil {
@@ -185,19 +199,50 @@ func (s *Session) startEngine() error {
 		return err
 	}
 	s.proc = server.NewProcess(s.Engine, s.Paths.Work, cfgPath, s.Paths.Run)
-	if s.proc.Running() == 0 {
-		if !s.cli.Alive() && !sysinfo.PortFree(s.Cfg.APIPort) {
+	// An engine already answering on the API port is reused even if wxdl did
+	// not start it, so a stale pid file cannot spawn a second one that fails to
+	// bind and leaves nothing on the proxy port.
+	if s.proc.Running() == 0 && !s.cli.Alive() {
+		if !sysinfo.PortFree(s.Cfg.APIPort) {
 			return fmt.Errorf("端口 %d 已被其他程序占用，请改 ~/.wxdl/config.json 里的 api_port", s.Cfg.APIPort)
 		}
-		if err := s.proc.Start(s.Cfg.APIPort); err != nil {
+		if !sysinfo.PortFree(s.Cfg.ProxyPort) {
+			return fmt.Errorf("代理端口 %d 已被其他程序占用，请改 ~/.wxdl/config.json 里的 proxy_port", s.Cfg.ProxyPort)
+		}
+		if err := s.proc.Start(s.Cfg.ProxyPort); err != nil {
 			return err
 		}
 	}
 	if err := s.proc.WaitReady(s.cli, 45*time.Second); err != nil {
 		return err
 	}
-	_ = s.cli.EnableMCP()
+	if err := s.cli.StartInterceptor(); err != nil {
+		return err
+	}
+	// The system proxy is about to point at this port. If the engine's capture
+	// listener is not actually up, taking over the proxy would cut the whole
+	// machine off, so refuse before any privileged step.
+	if !s.waitProxyPort(8 * time.Second) {
+		return fmt.Errorf("抓取引擎没有在 127.0.0.1:%d 开始监听，已停止（未改动系统代理）。"+
+			"请先运行 wxdl clean 再试，或把 ~/.wxdl/run/engine.log 发给开发者", s.Cfg.ProxyPort)
+	}
 	return nil
+}
+
+// waitProxyPort polls until the engine reports its own capture listener up. The
+// answer comes from the engine's /api/status, so a stranger already sitting on
+// that port cannot be mistaken for our listener.
+func (s *Session) waitProxyPort(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if s.cli.CaptureListener(s.Cfg.ProxyPort) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
 }
 
 // restartEngine reloads the engine so a freshly generated CA is picked up.
@@ -278,8 +323,37 @@ func (s *Session) resolveConflicts() error {
 // waitChannels blocks until a WeChat Channels page has connected through the
 // proxy; every Channels API call is served by that page.
 func (s *Session) waitChannels(timeout time.Duration) error {
+	asked := false
+	for {
+		if s.waitForPage(timeout) {
+			return nil
+		}
+		if asked || s.Opt.NoDialog {
+			return errors.New("没有检测到视频号页面。请确认微信已登录，并重新打开视频号页面")
+		}
+		// First-run injection usually needs a WeChat restart: the webview keeps the
+		// old proxy settings in its network service until the app relaunches.
+		retry, cancelled := dialog.Confirm("视频号页面还没连上",
+			"通常是微信内置浏览器还在用旧的代理设置。wxdl 可以重启微信后重试一次。",
+			"重启微信并重试", "不再重试")
+		if cancelled || !retry {
+			return errors.New("没有检测到视频号页面，无法继续")
+		}
+		// Only one restart per run: a second timeout is a real problem, not the
+		// stale-webview one this prompt fixes.
+		asked = true
+		if err := s.restartWeChat(); err != nil {
+			return err
+		}
+		timeout = 3 * time.Minute
+	}
+}
+
+// waitForPage opens WeChat when needed and polls the Channels page until the
+// deadline.
+func (s *Session) waitForPage(timeout time.Duration) bool {
 	if s.cli.ChannelsAvailable() {
-		return nil
+		return true
 	}
 	if !sysinfo.WeChatRunning() {
 		_ = exec.Command("open", "-a", "WeChat").Run()
@@ -289,26 +363,19 @@ func (s *Session) waitChannels(timeout time.Duration) error {
 			"点微信左侧的「视频号」入口，随便打开一条视频并保持页面开着。连接成功后 wxdl 会自动继续。")
 	}
 	deadline := time.Now().Add(timeout)
-	asked := false
 	for time.Now().Before(deadline) {
 		if s.cli.ChannelsAvailable() {
 			s.Say("视频号页面已连接。")
-			return nil
+			return true
 		}
 		time.Sleep(time.Second)
 	}
-	if asked || s.Opt.NoDialog {
-		return errors.New("2 分钟内没有检测到视频号页面。请确认微信已登录，并重新打开视频号页面")
-	}
-	// First-run injection usually needs a WeChat restart: the webview keeps the
-	// old proxy settings in its network service until the app relaunches.
-	retry, cancelled := dialog.Confirm("视频号页面还没连上",
-		"通常是微信内置浏览器还在用旧的代理设置。wxdl 可以重启微信后重试一次。",
-		"重启微信并重试", "不再重试")
-	if cancelled || !retry {
-		return errors.New("没有检测到视频号页面，无法继续")
-	}
-	asked = true
+	return false
+}
+
+// restartWeChat quits WeChat (asking the user when wxdl may not) and relaunches
+// it so the new proxy settings are picked up.
+func (s *Session) restartWeChat() error {
 	if err := quitApp("WeChat"); err != nil {
 		if ok, _ := dialog.Confirm("请手动退出微信",
 			"微信不允许 wxdl 自动退出。请右键托盘图标选择「退出微信」，然后点继续。", "我已退出", "取消"); !ok {
@@ -322,7 +389,7 @@ func (s *Session) waitChannels(timeout time.Duration) error {
 	if !s.Opt.NoDialog {
 		dialog.Info("微信已重启", "请在微信里重新打开视频号页面，wxdl 会自动继续。")
 	}
-	return s.waitChannels(3 * time.Minute)
+	return nil
 }
 
 // downloadOne creates a task through the engine and waits for the file.
@@ -334,11 +401,11 @@ func (s *Session) downloadOne(selector map[string]any) (string, error) {
 	if s.Opt.Filename != "" {
 		args["filename"] = s.Opt.Filename
 	}
-	// skip keeps re-runs cheap; when the record exists but the file does not,
-	// the same task is recreated with overwrite.
-	for attempt, action := range []string{"skip", "overwrite"} {
-		_ = attempt
-		args["existing_action"] = action
+	// skip keeps re-runs cheap. A record whose file is missing (deleted by hand,
+	// or an interrupted run) cannot be overwritten by the engine, so wxdl drops
+	// the record and creates the task again.
+	args["existing_action"] = "skip"
+	for attempt := 1; attempt <= 2; attempt++ {
 		text, err := s.cli.CallTool("download_wxchannels_video", args)
 		if err != nil {
 			return "", err
@@ -351,9 +418,25 @@ func (s *Session) downloadOne(selector map[string]any) (string, error) {
 			}
 			id := asInt(task["id"])
 			detail, err := s.cli.TaskDetail(id)
-			if err == nil && bestFile(detail) != "" {
-				return bestFile(detail), nil
+			if err != nil {
+				return "", err
 			}
+			if path := bestFile(detail); path != "" {
+				if detail.Status == server.TaskFinished {
+					s.Say("  已存在，直接复用：%s", filepath.Base(path))
+					return path, nil
+				}
+				// Still running in another task slot: wait for it instead of
+				// reporting the partial file as done.
+				return s.waitTask(id)
+			}
+			if attempt == 2 {
+				return "", fmt.Errorf("任务 %d 的记录里没有可用的文件，清理记录后重新下载仍被跳过", id)
+			}
+			if err := s.cli.DeleteTasks(id); err != nil {
+				return "", fmt.Errorf("清理失效的下载记录失败: %w", err)
+			}
+			s.Say("  旧记录里的文件已经不在了，已清理记录并重新下载。")
 			continue
 		}
 		id := firstTaskID(resp)
@@ -402,6 +485,14 @@ func (s *Session) waitTask(id int) (string, error) {
 
 // Restore puts the machine back: system proxy first, then the engine process.
 func (s *Session) Restore(removeCert bool) error {
+	// The Ctrl-C handler and the normal end of a run can both get here; one of
+	// them must not raise a second elevation prompt behind the other's back.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Reaching this point ends the session, so the instance lock goes with it on
+	// every path, including a dismissed elevation prompt.
+	defer s.releaseLock()
+
 	st := s.State
 	if st == nil {
 		var err error
@@ -417,20 +508,62 @@ func (s *Session) Restore(removeCert bool) error {
 	if service == "" {
 		service = st.Service
 	}
+	if service == "" {
+		// A damaged or empty record still needs a name to restore; the current
+		// primary service is the only candidate left.
+		service = sysinfo.PrimaryService()
+	}
 	remaining, err := proxy.Restore(st, removeCert, service)
+	// The engine is wxdl's own process, so it stops even when the privileged
+	// rollback was dismissed; otherwise a failed undo leaves it running.
+	s.StopEngine()
 	if err != nil {
 		return err
 	}
 	s.State = remaining
-	if s.proc != nil {
-		s.proc.Stop()
-	}
 	if remaining == nil {
 		s.Say("已恢复系统代理设置，抓取引擎已停止。")
 	} else {
 		s.Say("已恢复系统代理设置；根证书 %s 仍保留在系统里（wxdl undo --cert 可删除）。", s.Cfg.CAName)
 	}
 	return nil
+}
+
+func (s *Session) releaseLock() {
+	if s.unlock != nil {
+		s.unlock()
+		s.unlock = nil
+	}
+}
+
+// releaseMachine stops the engine and, when a previous --keep run left it on,
+// the system proxy too. Commands that delete or replace the engine must not run
+// with the proxy pointing at a port that is about to have nothing listening.
+func (s *Session) releaseMachine() error {
+	if s.State != nil && s.State.Applied {
+		s.Say("系统代理还指向 wxdl，先恢复原来的网络设置。")
+		if err := s.Restore(false); err != nil {
+			return fmt.Errorf("恢复系统代理失败，已停止本次操作（继续会让本机无法上网）: %w", err)
+		}
+		return nil // Restore stopped the engine too
+	}
+	s.StopEngine()
+	return nil
+}
+
+// Abort releases what a run took over when the download cannot start. The
+// system proxy must never outlive a failed run unless the user asked for
+// --keep: after a reboot nothing listens on the port and the machine looks
+// offline.
+func (s *Session) Abort() {
+	if s.Opt.Keep || !proxy.Active(s.Service, s.Cfg.ProxyPort) {
+		s.StopEngine()
+		s.releaseLock()
+		return
+	}
+	if err := s.Restore(false); err != nil {
+		s.Say("自动恢复系统代理失败，请手动检查「系统设置-网络-代理」：%v", err)
+	}
 }
 
 // Finish ends the run, keeping capture alive only when asked.
@@ -443,10 +576,16 @@ func (s *Session) Finish() error {
 }
 
 // StopEngine shuts the engine down without touching the proxy.
-func (s *Session) StopEngine() {
+func (s *Session) StopEngine() { s.engineProcess().Stop() }
+
+// engineProcess returns a handle for the engine belonging to this wxdl
+// directory whether or not this run started it: the pid file is how any wxdl
+// process finds a `--keep` engine still alive.
+func (s *Session) engineProcess() *server.Process {
 	if s.proc != nil {
-		s.proc.Stop()
+		return s.proc
 	}
+	return server.NewProcess(s.EngineName(), s.Paths.Work, "", s.Paths.Run)
 }
 
 // Status renders a human-readable report of the machine and the run state.
@@ -485,13 +624,15 @@ func (s *Session) EngineName() string {
 func (s *Session) persist() error { return s.Cfg.Save() }
 
 func pidText(s *Session) string {
-	if s.proc == nil {
-		return "未启动"
-	}
-	if pid := s.proc.Running(); pid > 0 {
+	// Read the pid file rather than s.proc: `wxdl status` runs in its own
+	// process, so an engine left alive by a `--keep` run has no s.proc here.
+	if pid := s.engineProcess().Running(); pid > 0 {
 		return fmt.Sprintf("运行中 (pid %d)", pid)
 	}
-	return "未运行"
+	if s.proc != nil {
+		return "未运行"
+	}
+	return "未启动"
 }
 
 func aliveText(s *Session) string {
@@ -665,9 +806,12 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f%s", v, unit[i])
 }
 
+// truncate cuts on rune boundaries: byte slices of a Chinese video title or a
+// URL with a multibyte tail print as mojibake.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string(r[:n]) + "…"
 }

@@ -24,6 +24,7 @@ type Client struct {
 	hc     *http.Client
 	mcpURL string
 	sid    string
+	mcpOn  bool
 }
 
 // New builds a client for the local API port.
@@ -59,7 +60,6 @@ type File struct {
 	Type       string `json:"type"`
 	Size       int64  `json:"size"`
 	Downloaded int64  `json:"downloaded"`
-	Status     int    `json:"status"`
 	FileType   string `json:"file_type"`
 	LocalPath  string `json:"local_path"`
 	Exists     bool   `json:"exists"`
@@ -114,6 +114,38 @@ func (c *Client) TaskDetail(id int) (*TaskDetail, error) {
 	}
 	d.ID = id
 	return &d, nil
+}
+
+// DeleteTasks drops task records without touching any file on disk
+// (delete_files defaults to false upstream). wxdl uses it to clear a stale
+// record whose output file is gone, which the engine refuses to overwrite.
+func (c *Client) DeleteTasks(ids ...int) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	raw, err := c.CallTool("delete_download_tasks", map[string]any{
+		"task_ids":     ids,
+		"delete_files": false,
+	})
+	if err != nil {
+		return err
+	}
+	var resp struct {
+		Results []struct {
+			TaskID     int    `json:"task_id"`
+			Success    bool   `json:"success"`
+			StatusText string `json:"status_text"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		return nil // shape changed; the JSON-RPC error path already covers refusals
+	}
+	for _, r := range resp.Results {
+		if !r.Success {
+			return fmt.Errorf("删除任务 %d 的记录失败（状态 %s）", r.TaskID, r.StatusText)
+		}
+	}
+	return nil
 }
 
 func (c *Client) get(path string) ([]byte, error) {
@@ -171,6 +203,54 @@ func (c *Client) ProxyStatus() (map[string]any, error) {
 		return nil, fmt.Errorf("proxy/status: %s", env.Msg)
 	}
 	return env.Data, nil
+}
+
+// CaptureListener reports whether the engine's own capture listener is up on
+// port. A bare TCP accept is not enough evidence before taking over the system
+// proxy: another program on that port would swallow all of the machine's
+// traffic and no Channels request would ever reach wxdl.
+func (c *Client) CaptureListener(port int) bool {
+	raw, err := c.get("/api/status")
+	if err != nil {
+		return false
+	}
+	var env struct {
+		Code int `json:"code"`
+		Data struct {
+			Proxy struct {
+				Addr      string `json:"addr"`
+				Listening bool   `json:"listening"`
+			} `json:"proxy"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &env) != nil || env.Code != 0 {
+		return false
+	}
+	return env.Data.Proxy.Listening &&
+		strings.HasSuffix(env.Data.Proxy.Addr, ":"+strconv.Itoa(port))
+}
+
+// StartInterceptor brings the capture service up. The engine only starts its
+// HTTP API by itself: until this call nothing listens on the proxy port, so
+// pointing the system proxy at it would black-hole the whole machine.
+func (c *Client) StartInterceptor() error {
+	raw, err := c.post("/api/service/start", map[string]any{"name": "interceptor"})
+	if err != nil {
+		return err
+	}
+	var e envelope
+	if json.Unmarshal(raw, &e) != nil {
+		// A payload wxdl cannot read is not a refusal: the caller checks the
+		// capture listener itself before it lets the system proxy point at it.
+		return nil
+	}
+	if e.Code != 0 {
+		return fmt.Errorf("启动抓包服务失败: %s", e.Msg)
+	}
+	if status, ok := e.Data["interceptor"].(string); ok && status != "running" {
+		return fmt.Errorf("启动抓包服务后状态异常: %v", e.Data)
+	}
+	return nil
 }
 
 // EnableMCP turns on the Streamable HTTP MCP endpoint.
@@ -272,9 +352,13 @@ func (c *Client) CallTool(name string, args map[string]any) (string, error) {
 }
 
 func (c *Client) mcpInit() error {
-	if c.sid != "" {
+	if c.mcpOn {
 		return nil
 	}
+	// The endpoint stays off until asked; an engine restart resets it, so every
+	// tool call makes the attempt itself. initialize reports the real reason if
+	// it is still unavailable.
+	_ = c.EnableMCP()
 	body := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
@@ -294,13 +378,14 @@ func (c *Client) mcpInit() error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	sid := resp.Header.Get("mcp-session-id")
-	if sid == "" {
-		return errors.New("MCP 未返回 session id，请先在设置里启用 MCP")
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("抓取引擎的 MCP 端点不可用（HTTP %d）：%s", resp.StatusCode, truncate(strings.TrimSpace(string(raw)), 200))
 	}
-	c.sid = sid
+	// Stateless engines answer without a session header; the spec allows that.
+	c.sid = resp.Header.Get("mcp-session-id")
+	c.mcpOn = true
 
 	note := map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"}
 	req2, err := http.NewRequest(http.MethodPost, c.mcpURL, jsonReader(note))
@@ -308,7 +393,9 @@ func (c *Client) mcpInit() error {
 		return nil
 	}
 	setMCPHeaders(req2)
-	req2.Header.Set("mcp-session-id", sid)
+	if c.sid != "" {
+		req2.Header.Set("mcp-session-id", c.sid)
+	}
 	if resp2, err := c.hc.Do(req2); err == nil {
 		_, _ = io.Copy(io.Discard, resp2.Body)
 		resp2.Body.Close()
@@ -332,7 +419,9 @@ func (c *Client) mcpPost(body map[string]any) ([]byte, error) {
 		return nil, err
 	}
 	setMCPHeaders(req)
-	req.Header.Set("mcp-session-id", c.sid)
+	if c.sid != "" {
+		req.Header.Set("mcp-session-id", c.sid)
+	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return nil, err
@@ -357,10 +446,11 @@ func (c *Client) mcpPost(body map[string]any) ([]byte, error) {
 }
 
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string(r[:n]) + "…"
 }
 
 // Process handles the engine child process and its pid file.
@@ -398,7 +488,13 @@ func (p *Process) Running() int {
 
 // Start launches the engine detached enough to survive this process, logging
 // to runDir/engine.log.
-func (p *Process) Start(apiPort int) error {
+//
+// --hostname/--port configure the engine's *proxy* listener, not the API: the
+// API address only comes from config.yaml. Passing the API port here made the
+// interceptor try to bind the API's own port, so nothing listened on the proxy
+// port and the machine lost its network the moment the system proxy pointed at
+// it.
+func (p *Process) Start(proxyPort int) error {
 	if pid := p.Running(); pid > 0 {
 		return nil
 	}
@@ -411,7 +507,7 @@ func (p *Process) Start(apiPort int) error {
 		return err
 	}
 	cmd := exec.Command(p.bin, "server", "--config", p.cfgPath, "--workdir", p.workDir,
-		"--hostname", "127.0.0.1", "--port", strconv.Itoa(apiPort))
+		"--hostname", "127.0.0.1", "--port", strconv.Itoa(proxyPort))
 	cmd.Dir = p.workDir
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	if err := cmd.Start(); err != nil {

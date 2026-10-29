@@ -234,18 +234,25 @@ func (s *Session) ResolveAccount(input string) (string, string, error) {
 	return choice, "", nil
 }
 
+// finish ends the run. A failed rollback is never hidden: the user has to know
+// the system proxy still points at wxdl.
+func (s *Session) finish() {
+	if err := s.Finish(); err != nil {
+		s.Say("恢复系统代理时出错，请手动检查「系统设置-网络-代理」：%v", err)
+	}
+}
+
 // Run prepares the machine, downloads everything and puts the machine back.
 func (s *Session) Run(items []Item) error {
 	if len(items) == 0 {
 		return fmt.Errorf("没有需要下载的内容")
 	}
 	if err := s.Prepare(); err != nil {
+		s.Abort()
 		return err
 	}
 	results := s.Batch(items)
-	if err := s.Finish(); err != nil {
-		s.Say("恢复系统代理时出错，请手动检查「系统设置-网络-代理」：%v", err)
-	}
+	s.finish()
 	ok := 0
 	for _, r := range results {
 		if r.Err == nil {
@@ -265,17 +272,18 @@ func (s *Session) RunLinks(links []string) error { return s.Run(ItemsFromLinks(l
 // maxPages list pages.
 func (s *Session) RunAccount(input string, limit, maxPages int) error {
 	if err := s.Prepare(); err != nil {
+		s.Abort()
 		return err
 	}
 	username, nickname, err := s.ResolveAccount(input)
 	if err != nil {
-		_ = s.Finish()
+		s.finish()
 		return err
 	}
 	s.Say("账号：%s (%s)", nickname, username)
 	items, err := s.VideosOfAccount(username, limit, maxPages)
 	if err != nil {
-		_ = s.Finish()
+		s.finish()
 		return err
 	}
 	if !s.Opt.NoDialog {
@@ -283,7 +291,7 @@ func (s *Session) RunAccount(input string, limit, maxPages int) error {
 			fmt.Sprintf("准备下载该账号最近 %d 个视频，是否继续？", len(items)),
 			"开始下载", "取消")
 		if cancelled || !ok {
-			_ = s.Finish()
+			s.finish()
 			return fmt.Errorf("已取消")
 		}
 	}
@@ -292,9 +300,7 @@ func (s *Session) RunAccount(input string, limit, maxPages int) error {
 
 func (s *Session) runPrepared(items []Item) error {
 	results := s.Batch(items)
-	if err := s.Finish(); err != nil {
-		s.Say("恢复系统代理时出错，请手动检查「系统设置-网络-代理」：%v", err)
-	}
+	s.finish()
 	if allFailed(results) {
 		return fmt.Errorf("%d 个视频全部失败，见上面的失败原因", len(results))
 	}
@@ -475,8 +481,9 @@ func firstLine(s string) string {
 	if i := strings.IndexAny(s, "\n\r"); i >= 0 {
 		return s[:i]
 	}
-	if len(s) > 90 {
-		return s[:90] + "…"
+	r := []rune(s)
+	if len(r) > 90 {
+		return string(r[:90]) + "…"
 	}
 	return s
 }

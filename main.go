@@ -28,11 +28,20 @@ var (
 )
 
 func main() {
-	if len(os.Args) > 1 && wantsHelp(os.Args[2:]) {
-		os.Args = append(os.Args[:1], "-h")
+	raw := os.Args[1:]
+	if len(raw) > 0 && (raw[0] == "-h" || raw[0] == "--help") {
+		usage()
+		return
 	}
-	cmd, args := dispatch(os.Args[1:])
+	cmd, args := dispatch(raw)
+	if len(args) > 0 && wantsHelp(args) {
+		// `wxdl get 链接 --help` asks for that subcommand's own usage.
+		args = []string{"-h"}
+	}
 	if err := run(cmd, args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return // the flag set already printed its usage
+		}
 		fmt.Fprintf(os.Stderr, "\n❌ %v\n", err)
 		os.Exit(1)
 	}
@@ -126,11 +135,66 @@ func (c *commonFlags) options() flow.Options {
 	}
 }
 
+// parseFlags accepts flags written after the positional arguments, so
+// `wxdl user 昵称 --limit 5` and `wxdl get 链接 -o ~/视频` behave the way people
+// type them; the standard library stops parsing at the first positional.
+func parseFlags(fs *flag.FlagSet, args []string) error {
+	var reordered, positional, literals []string
+	literal := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" && !literal {
+			// Everything after "--" is an argument, even a word that looks like
+			// a flag.
+			literal = true
+			continue
+		}
+		if literal {
+			literals = append(literals, a)
+			continue
+		}
+		if len(a) < 2 || !strings.HasPrefix(a, "-") {
+			positional = append(positional, a)
+			continue
+		}
+		name := strings.TrimLeft(a, "-")
+		if j := strings.Index(name, "="); j >= 0 {
+			name = name[:j]
+		}
+		reordered = append(reordered, a)
+		f := fs.Lookup(name)
+		if f == nil {
+			continue // let Parse report the unknown flag
+		}
+		if _, isBool := f.Value.(interface{ IsBoolFlag() bool }); isBool {
+			continue
+		}
+		if !strings.Contains(a, "=") && i+1 < len(args) {
+			i++
+			reordered = append(reordered, args[i])
+		}
+	}
+	all := append(append(reordered, positional...), "--")
+	return fs.Parse(append(all, literals...))
+}
+
+// fsArgs returns the positional arguments without the "--" separator, which the
+// reorder above can leave inside the tail.
+func fsArgs(fs *flag.FlagSet) []string {
+	out := make([]string, 0, fs.NArg())
+	for _, a := range fs.Args() {
+		if a != "--" {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 func cmdGet(args []string) error {
 	fs := flag.NewFlagSet("get", flag.ContinueOnError)
 	shared := bindCommon(fs)
 	fileFlag := fs.String("file", "", "从文本文件读取链接（- 表示标准输入）")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	s, err := flow.New(shared.options())
@@ -139,9 +203,14 @@ func cmdGet(args []string) error {
 	}
 	installInterruptHandler(s)
 
-	links, err := collectLinks(fs.Args(), *fileFlag, s)
+	links, err := collectLinks(fsArgs(fs), *fileFlag, s)
 	if err != nil {
 		return err
+	}
+	if shared.filename != "" && len(links) > 1 {
+		// The engine names every task from this argument, so a batch would
+		// overwrite itself instead of producing one file per video.
+		return fmt.Errorf("--filename 只适用于单个链接（当前 %d 条），请去掉 --filename 或一次传一条", len(links))
 	}
 	fmt.Printf("待下载 %d 个视频。\n", len(links))
 	return finishError(s.RunLinks(links))
@@ -152,24 +221,27 @@ func cmdUser(args []string) error {
 	shared := bindCommon(fs)
 	limit := fs.Int("limit", 20, "最多下载多少个视频")
 	pages := fs.Int("pages", 5, "最多翻多少页列表")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
 		return errors.New("用法：wxdl user <视频号昵称/username/该账号任意一条视频链接>")
+	}
+	if shared.filename != "" {
+		return errors.New("user 是批量下载，不支持 --filename；单个文件请用 wxdl get <链接> --filename 名称")
 	}
 	s, err := flow.New(shared.options())
 	if err != nil {
 		return err
 	}
 	installInterruptHandler(s)
-	return finishError(s.RunAccount(strings.Join(fs.Args(), " "), *limit, *pages))
+	return finishError(s.RunAccount(strings.Join(fsArgs(fs), " "), *limit, *pages))
 }
 
 func cmdDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	shared := bindCommon(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	s, err := flow.New(shared.options())
@@ -189,7 +261,7 @@ func cmdDoctor(args []string) error {
 func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	shared := bindCommon(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	s, err := flow.New(shared.options())
@@ -204,7 +276,7 @@ func cmdUndo(args []string) error {
 	fs := flag.NewFlagSet("undo", flag.ContinueOnError)
 	shared := bindCommon(fs)
 	removeCert := fs.Bool("cert", false, "同时删除本机根证书（下次使用需要重新授权）")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	s, err := flow.New(shared.options())
@@ -225,7 +297,7 @@ func cmdUpdate(args []string) error {
 	shared := bindCommon(fs)
 	tag := fs.String("tag", "", "安装指定的上游版本，例如 v260907")
 	follow := fs.Bool("follow", false, "跟随上游最新版本")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	s, err := flow.New(shared.options())
@@ -241,7 +313,7 @@ func cmdUpdate(args []string) error {
 func cmdSimple(args []string, name string) error {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	shared := bindCommon(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	s, err := flow.New(shared.options())
@@ -297,7 +369,10 @@ func installInterruptHandler(s *flow.Session) {
 	go func() {
 		for range ch {
 			fmt.Println("\n收到中断，正在恢复系统代理设置 ...")
-			_ = s.Restore(false)
+			// Stop catching further signals: a second Ctrl-C while the elevation
+			// panel is open must not start a parallel rollback.
+			signal.Stop(ch)
+			s.Abort()
 			os.Exit(130)
 		}
 	}()
@@ -305,18 +380,20 @@ func installInterruptHandler(s *flow.Session) {
 
 func usage() {
 	prog := filepath.Base(os.Args[0])
+	// Pads are counted in terminal cells (CJK glyphs take two), which %-8s-style
+	// verbs cannot do; the description column must line up for a friendly tool.
 	fmt.Print(`用法：
-  ` + prog + ` [视频号链接...]              批量下载（默认命令，不传参数会读剪贴板或弹窗输入）
+  ` + prog + ` [视频号链接...]            批量下载（默认命令，不传参数会读剪贴板或弹窗输入）
   ` + prog + ` get <链接...>              批量下载指定链接
-  ` + prog + ` get --file links.txt        从文本文件批量下载（一行一个，或整段文字里自动识别）
-  ` + prog + ` user <账号昵称>             批量下载某个视频号账号的视频
-  ` + prog + ` doctor                      环境自检，不改动任何设置
-  ` + prog + ` status                      查看当前状态
-  ` + prog + ` undo [--cert]               恢复系统代理（可选删除根证书）
-  ` + prog + ` update [--follow|--tag V]   更新抓取引擎（默认钉定上游版本）
-  ` + prog + ` clean                       删除抓取引擎文件，保留视频和配置
-  ` + prog + ` install-shortcut            在桌面创建双击入口
-  ` + prog + ` version                     版本信息
+  ` + prog + ` get --file links.txt       从文本文件批量下载（一行一个，或整段文字里自动识别）
+  ` + prog + ` user <账号昵称>            批量下载某个视频号账号的视频
+  ` + prog + ` doctor                     环境自检，不改动任何设置
+  ` + prog + ` status                     查看当前状态
+  ` + prog + ` undo [--cert]              恢复系统代理（可选删除根证书）
+  ` + prog + ` update [--follow|--tag V]  更新抓取引擎（默认钉定上游版本）
+  ` + prog + ` clean                      删除抓取引擎文件，保留视频和配置
+  ` + prog + ` install-shortcut           在桌面创建双击入口
+  ` + prog + ` version                    版本信息
 
 常用参数：
   --out DIR        下载目录（默认 ~/Downloads/wxdl）

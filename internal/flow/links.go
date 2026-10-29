@@ -2,6 +2,7 @@ package flow
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -13,14 +14,20 @@ var anyURL = regexp.MustCompile(`https?://[A-Za-z0-9./?=_%~+&@#$!();:,~\-\[\]]+`
 // channelHosts are the hosts a Channels share link can use.
 var channelHosts = []string{"weixin.qq.com", "channels.weixin.qq.com", "finder.video.qq.com"}
 
-// IsChannelsLink reports whether the URL is a WeChat Channels share link.
+// IsChannelsLink reports whether the URL is a WeChat Channels share link. The
+// host is compared exactly: "https://weixin.qq.com.evil.com/" must not qualify,
+// because everything handed to the engine travels with the WeChat session.
 func IsChannelsLink(u string) bool {
-	lower := strings.ToLower(u)
-	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+	parsed, err := url.Parse(strings.TrimSpace(u))
+	if err != nil {
 		return false
 	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
 	for _, h := range channelHosts {
-		if strings.Contains(lower, "://"+h+"/") || strings.Contains(lower, "://"+h) {
+		if host == h {
 			return true
 		}
 	}
@@ -33,7 +40,9 @@ func ExtractLinks(text string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, raw := range anyURL.FindAllString(text, -1) {
-		u := strings.TrimRight(raw, ".,;:!。，；：！、")
+		// Closing brackets and quotes come from markdown or chat bubbles, never
+		// from a sph short link.
+		u := strings.TrimRight(raw, ".,;:!。，；：！、)]}>\"'”》")
 		if !IsChannelsLink(u) || seen[u] {
 			continue
 		}

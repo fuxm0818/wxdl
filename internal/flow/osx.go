@@ -119,6 +119,12 @@ func ReadLinesFromStdin(prompt string) string {
 	return b.String()
 }
 
+// shSingleQuote quotes a path for bash. Go's %q emits double quotes, where a "$"
+// or backtick inside an install path would be expanded by the shell.
+func shSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // InstallShortcut drops a double-clickable .command file on the Desktop that
 // runs `wxdl get` in Terminal, so non-technical users never type a command.
 func InstallShortcut() (string, error) {
@@ -142,8 +148,8 @@ func InstallShortcut() (string, error) {
 	body := fmt.Sprintf(`#!/bin/bash
 # 双击即可批量下载：先在微信里复制视频号链接，再双击本文件。
 export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
-exec %q get
-`, exe)
+exec %s get
+`, shSingleQuote(exe))
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		return "", err
 	}

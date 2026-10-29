@@ -278,7 +278,13 @@ func ExtractBinary(zipPath, dest string) error {
 	if _, err := io.Copy(out, rc); err != nil {
 		return err
 	}
-	return os.Chmod(dest, 0o755)
+	if err := os.Chmod(dest, 0o755); err != nil {
+		return err
+	}
+	// A release zip pulled from a browser carries com.apple.quarantine, and Gatekeeper
+	// then refuses to launch the engine with an error no ordinary user can act on.
+	_ = exec.Command("xattr", "-d", "com.apple.quarantine", dest).Run()
+	return nil
 }
 
 // Ensure returns a usable engine binary path, provisioning it when missing.

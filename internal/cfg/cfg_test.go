@@ -52,3 +52,26 @@ func TestEnsureTightensExistingCertsDir(t *testing.T) {
 		t.Errorf("CertDir mode = %o, want 700", got)
 	}
 }
+
+// The engine writes its private key under <workdir>/certs, so Layout must name
+// that directory; a path of its own would leave the key in a 0755 folder.
+func TestLayoutCertsDirIsTheEngines(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	p, err := Layout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(root, ".wxdl", "work", "certs"); p.CertDir != want {
+		t.Fatalf("CertDir = %q, want %q", p.CertDir, want)
+	}
+	if err := p.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if got := perm(t, p.CertDir); got != 0o700 {
+		t.Errorf("CertDir mode = %o, want 700", got)
+	}
+	if got := perm(t, filepath.Join(root, ".wxdl", "work")); got != 0o755 {
+		t.Errorf("Work mode = %o, want 755", got)
+	}
+}

@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/fuxm0818/wxdl/internal/server"
@@ -100,5 +101,26 @@ func TestSelectorLabel(t *testing.T) {
 	}
 	if got := selectorLabel(map[string]any{"oid": "o", "nid": "n"}); got != "oid=o nid=n eid=" {
 		t.Fatalf("id label = %q", got)
+	}
+}
+
+func TestTruncateCountsCharacters(t *testing.T) {
+	// Cutting a Chinese title at a byte boundary produces mojibake.
+	if got := truncate("如何辨别假酒？一条视频讲清楚", 6); got != "如何辨别假酒…" {
+		t.Fatalf("got %q", got)
+	}
+	if got := truncate("abc", 10); got != "abc" {
+		t.Fatalf("short string changed: %q", got)
+	}
+}
+
+func TestFirstLineKeepsOneLineAndCountsCharacters(t *testing.T) {
+	if got := firstLine("第一行\n第二行"); got != "第一行" {
+		t.Fatalf("got %q", got)
+	}
+	long := strings.Repeat("酒", 120)
+	got := firstLine(long)
+	if n := len([]rune(got)); n != 91 {
+		t.Fatalf("rune count = %d (%q)", n, got)
 	}
 }

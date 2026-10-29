@@ -148,6 +148,9 @@ func (s *Session) PrintDoctor() int {
 
 // Clean removes the downloaded engine and its cache, keeping config and files.
 func (s *Session) Clean() error {
+	if err := s.releaseMachine(); err != nil {
+		return err
+	}
 	var removed []string
 	for _, p := range []string{s.Paths.Cache, filepath.Join(s.Paths.Bin, "wx_video_download"),
 		filepath.Join(s.Paths.Bin, ".upstream_tag")} {
@@ -170,6 +173,11 @@ func (s *Session) Clean() error {
 // Update re-provisions the engine. follow=true moves to the newest upstream
 // release and records it; otherwise the pinned tag is used.
 func (s *Session) Update(tag string, follow bool) error {
+	// Hand the network back first: the machine needs its real proxy settings to
+	// reach GitHub, and a running engine keeps the old binary busy.
+	if err := s.releaseMachine(); err != nil {
+		return err
+	}
 	if follow {
 		latest, err := upstream.LatestTag(s.Cfg.GitHubToken)
 		if err != nil {

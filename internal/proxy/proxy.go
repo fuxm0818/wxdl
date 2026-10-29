@@ -40,7 +40,9 @@ func statePath() (string, error) {
 	return filepath.Join(home, "state.json"), nil
 }
 
-// Load returns the saved state, or nil when wxdl has never applied anything.
+// Load returns the saved state, or nil when wxdl has never applied anything. A
+// record it cannot read is treated as "the proxy is still ours": failing here
+// would lock `wxdl undo` out while the machine still routes traffic to wxdl.
 func Load() (*State, error) {
 	path, err := statePath()
 	if err != nil {
@@ -55,7 +57,8 @@ func Load() (*State, error) {
 	}
 	st := &State{}
 	if err := json.Unmarshal(raw, st); err != nil {
-		return nil, fmt.Errorf("解析 %s 失败: %w", path, err)
+		fmt.Fprintf(os.Stderr, "⚠️ 无法解析 %s（%v），将按“代理仍被 wxdl 占用”处理，请用 wxdl undo 恢复。\n", path, err)
+		return &State{Applied: true}, nil
 	}
 	return st, nil
 }
@@ -65,14 +68,38 @@ func (s *State) Save() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	raw, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(raw, '\n'), 0o600)
+	return writeFileAtomic(path, append(raw, '\n'))
+}
+
+// writeFileAtomic replaces the file through a temporary in the same directory,
+// so a crash mid-write cannot leave a half-written rollback record behind.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".wxdl-state-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
 
 // Clear removes the rollback record once the machine is back to its old state.
@@ -129,14 +156,17 @@ func Apply(service string, port int, certFile, certName string) (*State, error) 
 	trustNeeded := certFile != "" && !sysinfo.CertTrusted(certFile)
 	needsProxy := !allOurs(port, current)
 	// Snapshot the machine's own settings before the first change so Restore can
-	// put them back verbatim.
+	// put them back verbatim. Slots already pointing at wxdl are excluded: they
+	// were our own leftover, and restoring them would leave a dead proxy on.
 	if len(st.Prior) == 0 && (trustNeeded || needsProxy) {
-		st.Prior = filterKinds(current, kinds)
+		st.Prior = machineSlots(current, kinds, port)
 		st.StartedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 
 	var script []string
 	if trustNeeded {
+		// Same trust setting the established local-CA tools install: the WeChat
+		// webview's verification path is not something wxdl can narrow from here.
 		script = append(script,
 			"security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "+shq(certFile))
 	}
@@ -197,11 +227,23 @@ func Restore(st *State, removeCert bool, service string) (*State, error) {
 		}
 	}
 	if removeCert {
-		if st.CertName == "" {
-			return st, errors.New("没有记录证书名称，无法删除根证书")
+		// By fingerprint, not by common name: the name is user-editable, so a
+		// different root could share it and be deleted by mistake. `|| true`
+		// keeps an already-absent certificate from aborting the proxy restore in
+		// the same privileged script (elevate runs it under set -e).
+		fp, err := sysinfo.CertFingerprint(st.CertFile)
+		switch {
+		case err == nil:
+			script = append(script,
+				"security delete-certificate -Z "+fp+" /Library/Keychains/System.keychain || true")
+		case st.CertName != "":
+			script = append(script,
+				"security delete-certificate -c "+shq(st.CertName)+
+					" /Library/Keychains/System.keychain || true")
+		default:
+			// An unidentifiable certificate must never block the proxy rollback.
+			fmt.Fprintf(os.Stderr, "⚠️ 无法定位根证书（%v）：本次只恢复系统代理，请用「钥匙串访问」删除 %s。\n", err, st.CertFile)
 		}
-		script = append(script,
-			"security delete-certificate -c "+shq(st.CertName)+" /Library/Keychains/System.keychain")
 	}
 	if len(script) == 0 {
 		return st, nil
@@ -250,6 +292,21 @@ func filterKinds(all []sysinfo.ProxyState, want []string) []sysinfo.ProxyState {
 		if contains(want, p.Kind) {
 			out = append(out, p)
 		}
+	}
+	return out
+}
+
+// machineSlots is the rollback snapshot minus the slots that already point at
+// wxdl's own capture port. Those are leftovers from a previous run, not
+// settings the machine had on its own, so restoring them would re-enable a proxy
+// that nothing is listening on.
+func machineSlots(all []sysinfo.ProxyState, want []string, port int) []sysinfo.ProxyState {
+	var out []sysinfo.ProxyState
+	for _, p := range filterKinds(all, want) {
+		if p.Enabled && p.Host == "127.0.0.1" && p.Port == port {
+			continue
+		}
+		out = append(out, p)
 	}
 	return out
 }
