@@ -53,7 +53,9 @@ type Session struct {
 	mu sync.Mutex
 }
 
-// New loads configuration, creates ~/.wxdl and resolves the download dir.
+// New loads configuration and creates ~/.wxdl. It deliberately does not touch
+// the download directory: read-only commands (doctor, status, undo) must not
+// leave an empty ~/Downloads/wxdl behind next to the folder the user unpacked.
 func New(opt Options) (*Session, error) {
 	c, err := cfg.Load()
 	if err != nil {
@@ -71,9 +73,6 @@ func New(opt Options) (*Session, error) {
 	}
 	if abs, err := filepath.Abs(expandHome(c.DownloadDir)); err == nil {
 		c.DownloadDir = abs
-	}
-	if err := os.MkdirAll(c.DownloadDir, 0o755); err != nil {
-		return nil, fmt.Errorf("无法创建下载目录 %s: %w", c.DownloadDir, err)
 	}
 	st, err := proxy.Load()
 	if err != nil {
@@ -122,6 +121,10 @@ func (s *Session) Prepare() error {
 	// two simultaneous runs cannot fight over the system proxy or kill each
 	// other's engine. A process that dies still releases it.
 	s.unlock = release
+	if err := os.MkdirAll(s.Cfg.DownloadDir, 0o755); err != nil {
+		s.releaseLock()
+		return fmt.Errorf("无法创建下载目录 %s: %w", s.Cfg.DownloadDir, err)
+	}
 	s.Service = sysinfo.PrimaryService()
 	if s.Service == "" {
 		return errors.New("没有识别到正在使用的网络服务，请确认本机已连接 Wi-Fi 或有线网络")

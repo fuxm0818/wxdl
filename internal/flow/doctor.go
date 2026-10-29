@@ -123,7 +123,12 @@ func (s *Session) Doctor() []Check {
 		add("ffprobe", "warn", "未安装（可选）", "brew install ffmpeg 后 wxdl 会校验时长和分辨率")
 	}
 
-	add("下载目录", "ok", s.Cfg.DownloadDir, "")
+	if st, err := os.Stat(s.Cfg.DownloadDir); err == nil && st.IsDir() {
+		add("下载目录", "ok", s.Cfg.DownloadDir, "")
+	} else {
+		// Read-only checks must not create it; the first real download does.
+		add("下载目录", "ok", s.Cfg.DownloadDir+"（还不存在，第一次下载时自动创建）", "")
+	}
 	return out
 }
 

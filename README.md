@@ -73,7 +73,8 @@ wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOK
 另外还需要：
 
 - 本机装有 **微信 Mac 版并已登录**（视频号页面必须能在微信里打开）。
-- 你有这台电脑的**管理员密码**（第一次要信任根证书、改系统代理；没有密码就装不了，绕不过去）。
+- 你有这台电脑的**管理员密码**（安装脚本本身不用密码；第一次下载时要信任根证书、改系统代理，
+  那一步绕不过去）。
 - 如果你的 Clash / Surge 等代理软件在跑，wxdl 会提示并请你确认是否退出它们（会抢系统代理）。
 
 ## 安装
@@ -84,25 +85,32 @@ wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOK
 
    | 你的机器 | 文件 |
    | --- | --- |
-   | Apple Silicon（M1/M2/M3/M4） | `wxdl_v1.0.0_darwin_arm64.tar.gz` |
-   | Intel | `wxdl_v1.0.0_darwin_x86_64.tar.gz` |
+   | Apple Silicon（M1/M2/M3/M4） | `wxdl_v1.0.1_darwin_arm64.tar.gz` |
+   | Intel | `wxdl_v1.0.1_darwin_x86_64.tar.gz` |
+
+   文件名里的版本号以 Release 页面实际列出的最新一版为准。
 
    不确定机型就点屏幕左上角的苹果菜单 → 「关于本机」：显示「芯片」并写着 M1/M2/M3/M4 的是
    Apple Silicon，显示「处理器」的是 Intel。
 
-2. 双击压缩包解压，打开「终端」App，进去这个目录并跑安装脚本：
+2. 双击压缩包解压，打开「终端」App，进去解压出来的目录并跑安装脚本：
 
    ```bash
-   cd ~/Downloads/wxdl_v1.0.0_darwin_arm64
+   cd ~/Downloads/wxdl_v1.0.1_darwin_arm64
    sh install.sh
    ```
 
-   `install.sh` 会：
+   `install.sh` 全程**不需要管理员密码**，它会：
+   - 先清掉 macOS 给浏览器下载文件加的隔离属性——不清的话直接运行 `wxdl` 会被
+     Gatekeeper 拦下，报「Apple 无法验证"wxdl"是否包含恶意软件」；
    - 用包内 `checksums.txt` 逐个校验 sha256，文件被改动过就直接拒绝安装；
    - 把 `wxdl` 装到 `~/.wxdl/bin/wxdl`，并把内置的抓取引擎包放进 `~/.wxdl/vendor/`；
-   - 尝试软链到 `/usr/local/bin/wxdl`（这一步要输一次密码；没有权限它会打印一行 `export PATH=...` 让你粘贴）；
-   - 清掉 macOS 下载文件的隔离属性（否则会提示"无法验证开发者"）；
+   - 问你一句「要不要把 `~/.wxdl/bin` 加进 PATH」（写进 `~/.zshrc`，只加两行，随时可删；
+     不想要就回答 n 或加 `--no-path`，之后用全路径 `~/.wxdl/bin/wxdl` 一样能用）；
    - 在桌面创建双击入口「批量下载视频号视频.command」。
+
+   想让 `wxdl` 出现在 `/usr/local/bin`（需要输一次密码）就用 `sh install.sh --link`；
+   这是可选项，不加软链完全不影响使用。
 
 3. 自检一下环境，确认没问题再下载：
 
@@ -110,8 +118,11 @@ wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOK
    wxdl doctor
    ```
 
-   如果提示 macOS 拦截未签名程序，在「系统设置 → 隐私与安全性」里点「仍要打开」，
-   或对解压目录执行 `xattr -dr com.apple.quarantine .`。
+   如果你**没跑 install.sh** 就直接运行了 `./bin/wxdl`，被 macOS 拦下是正常的：
+   要么回到上一步跑一遍安装脚本，要么在解压目录执行
+   `xattr -dr com.apple.quarantine .`，要么在访达里右键 `wxdl` → 「打开」→「打开」。
+   wxdl 目前没有 Apple 开发者签名（签名 + 公证要付费的开发者账号），所以浏览器
+   下载的文件默认都会被拦一次，清掉隔离属性后就不会再拦。
 
 ### 方式 B：自己编译（需要 Go 1.23+，除标准库外零依赖）
 
