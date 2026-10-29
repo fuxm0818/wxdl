@@ -111,3 +111,19 @@ func TestEqualsSyntax(t *testing.T) {
 		t.Fatalf("args = %q", got)
 	}
 }
+
+func TestSpecFlagAfterPositional(t *testing.T) {
+	fs, c, _ := testSet()
+	if err := parseFlags(fs, []string{"https://weixin.qq.com/sph/abc", "--spec", "original"}); err != nil {
+		t.Fatal(err)
+	}
+	if c.spec != "original" {
+		t.Fatalf("spec = %q", c.spec)
+	}
+	if got := fsArgs(fs); len(got) != 1 {
+		t.Fatalf("args = %q", got)
+	}
+	if c.options().Spec != "original" {
+		t.Fatal("Options.Spec not wired")
+	}
+}

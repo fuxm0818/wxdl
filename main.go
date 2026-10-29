@@ -79,6 +79,10 @@ func run(cmd string, args []string) error {
 		return cmdDoctor(args)
 	case "status":
 		return cmdStatus(args)
+	case "on":
+		return cmdOn(args)
+	case "off":
+		return cmdUndo(args)
 	case "undo":
 		return cmdUndo(args)
 	case "clean":
@@ -107,6 +111,7 @@ type commonFlags struct {
 	zip      string
 	filename string
 	timeout  time.Duration
+	spec     string
 }
 
 func bindCommon(fs *flag.FlagSet) *commonFlags {
@@ -118,6 +123,7 @@ func bindCommon(fs *flag.FlagSet) *commonFlags {
 	fs.StringVar(&c.zip, "zip", "", "使用本地 wx_video_download_*.zip 安装包，不联网下载")
 	fs.StringVar(&c.filename, "filename", "", "自定义文件名（仅单个视频时有意义）")
 	fs.DurationVar(&c.timeout, "timeout", 20*time.Minute, "单个视频的最长等待时间")
+	fs.StringVar(&c.spec, "spec", "", "视频规格：original 取原始视频，留空用引擎默认")
 	return c
 }
 
@@ -132,6 +138,7 @@ func (c *commonFlags) options() flow.Options {
 		NoDialog:    c.yes,
 		UpstreamZip: c.zip,
 		TaskTimeout: c.timeout,
+		Spec:        c.spec,
 	}
 }
 
@@ -292,6 +299,20 @@ func cmdUndo(args []string) error {
 	return nil
 }
 
+func cmdOn(args []string) error {
+	fs := flag.NewFlagSet("on", flag.ContinueOnError)
+	shared := bindCommon(fs)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	s, err := flow.New(shared.options())
+	if err != nil {
+		return err
+	}
+	installInterruptHandler(s)
+	return s.Serve()
+}
+
 func cmdUpdate(args []string) error {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	shared := bindCommon(fs)
@@ -387,8 +408,10 @@ func usage() {
   ` + prog + ` get <链接...>              批量下载指定链接
   ` + prog + ` get --file links.txt       从文本文件批量下载（一行一个，或整段文字里自动识别）
   ` + prog + ` user <账号昵称>            批量下载某个视频号账号的视频
+  ` + prog + ` on                         常驻模式：视频号窗口出现「下载」按钮（wxdl off 结束）
   ` + prog + ` doctor                     环境自检，不改动任何设置
   ` + prog + ` status                     查看当前状态
+  ` + prog + ` off                        恢复系统代理，退出常驻模式（同 undo）
   ` + prog + ` undo [--cert]              恢复系统代理（可选删除根证书）
   ` + prog + ` update [--follow|--tag V]  更新抓取引擎（默认钉定上游版本）
   ` + prog + ` clean                      删除抓取引擎文件，保留视频和配置
@@ -398,6 +421,7 @@ func usage() {
 常用参数：
   --out DIR        下载目录（默认 ~/Downloads/wxdl）
   --keep           下载后不恢复代理，方便连续批量下载
+  --spec original  下载原始视频（不传则用引擎默认规格）
   --limit N        user 命令的下载数量上限（默认 20）
   --yes            不弹窗，用于脚本/CI
   --zip FILE       使用本地抓取引擎安装包，不联网

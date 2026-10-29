@@ -32,6 +32,9 @@ type Options struct {
 	NoDialog    bool
 	UpstreamZip string
 	TaskTimeout time.Duration
+	// Spec is passed to the engine as video_variant_spec; "original" asks for
+	// the untouched source file instead of the transcoded variant.
+	Spec string
 }
 
 // Session owns one wxdl run: engine process, proxy state and API client.
@@ -110,6 +113,15 @@ func (s *Session) Ask(title, msg, def string) (string, bool) {
 // Prepare gets the machine ready to capture. It is the long part of every run
 // and the one that touches the system, so it stops at the first hard blocker.
 func (s *Session) Prepare() error {
+	if err := s.prepareMachine(); err != nil {
+		return err
+	}
+	return s.waitChannels(2 * time.Minute)
+}
+
+// prepareMachine brings the engine, certificate and system proxy up but does
+// not require the 视频号 page yet. `wxdl on` stops here and keeps them running.
+func (s *Session) prepareMachine() error {
 	if runtime.GOOS != "darwin" {
 		return errors.New("wxdl 目前只支持 macOS：视频号的播放地址需要微信 macOS 客户端的登录状态")
 	}
@@ -171,7 +183,7 @@ func (s *Session) Prepare() error {
 	if err := s.persist(); err != nil {
 		return err
 	}
-	return s.waitChannels(2 * time.Minute)
+	return nil
 }
 
 // provision resolves the engine binary, downloading it when missing.
@@ -569,6 +581,28 @@ func (s *Session) Abort() {
 	}
 }
 
+// Serve leaves wxdl running in the background of the machine's network: engine,
+// certificate and system proxy stay up so the engine keeps injecting its
+// download button into the 视频号 page. wxdl off restores the network.
+func (s *Session) Serve() error {
+	if err := s.prepareMachine(); err != nil {
+		s.Abort()
+		return err
+	}
+	s.Say("抓取引擎与系统代理已就绪，wxdl 退出后仍保持运行。")
+	if err := s.waitChannels(90 * time.Second); err != nil {
+		// The page may be opened at any time, and the proxy has to stay up for
+		// that to work at all, so a missing page is a hint rather than a failure.
+		s.Say("视频号页面还没连上：在微信里打开视频号页面并刷新一下即可。")
+	} else {
+		s.Say("视频号页面已连接。")
+	}
+	s.Say("视频号窗口里会出现「下载」按钮（引擎注入），可按单条下载；批量照旧用 wxdl get。")
+	s.Say("结束并恢复网络：wxdl off")
+	s.releaseLock()
+	return nil
+}
+
 // Finish ends the run, keeping capture alive only when asked.
 func (s *Session) Finish() error {
 	if s.Opt.Keep {
@@ -605,9 +639,17 @@ func (s *Session) Status() string {
 	lines = append(lines, "引擎: "+s.EngineName()+" "+tag)
 	lines = append(lines, fmt.Sprintf("抓取引擎进程: %s", pidText(s)))
 	lines = append(lines, fmt.Sprintf("本机 API: %s", aliveText(s)))
-	if s.Service != "" {
-		lines = append(lines, "网络服务: "+s.Service)
-		lines = append(lines, fmt.Sprintf("系统代理: %s", proxyText(s)))
+	service := s.Service
+	if service == "" {
+		// status is read-only: resolve the active interface without touching it.
+		service = sysinfo.PrimaryService()
+	}
+	if service != "" {
+		lines = append(lines, "网络服务: "+service)
+		lines = append(lines, fmt.Sprintf("系统代理: %s", proxyText(s, service)))
+		if proxy.Active(service, s.Cfg.ProxyPort) {
+			lines = append(lines, "常驻模式: 开（视频号窗口有「下载」按钮；wxdl off 结束）")
+		}
 	}
 	lines = append(lines, fmt.Sprintf("根证书: %s", certText(s)))
 	lines = append(lines, fmt.Sprintf("视频号页面: %s", pageText(s)))
@@ -645,12 +687,12 @@ func aliveText(s *Session) string {
 	return "不可访问"
 }
 
-func proxyText(s *Session) string {
-	if proxy.Active(s.Service, s.Cfg.ProxyPort) {
+func proxyText(s *Session, service string) string {
+	if proxy.Active(service, s.Cfg.ProxyPort) {
 		return fmt.Sprintf("已指向 wxdl (127.0.0.1:%d)", s.Cfg.ProxyPort)
 	}
 	parts := make([]string, 0, 3)
-	for _, p := range sysinfo.Proxies(s.Service) {
+	for _, p := range sysinfo.Proxies(service) {
 		state := "关闭"
 		if p.Enabled {
 			state = p.Host + ":" + strconv.Itoa(p.Port)

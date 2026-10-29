@@ -34,6 +34,10 @@ func (s *Session) Batch(items []Item) []Result {
 		s.Say("没有需要下载的内容。")
 		return out
 	}
+	if s.Opt.Spec != "" {
+		items = withSpec(items, s.Opt.Spec)
+		s.Say("视频规格：%s", s.Opt.Spec)
+	}
 	s.Say("共 %d 个视频，开始批量下载（下载目录：%s）", len(items), s.Cfg.DownloadDir)
 	for i, it := range items {
 		label := it.Label
@@ -324,6 +328,21 @@ func ItemsFromLinks(links []string) []Item {
 	out := make([]Item, 0, len(links))
 	for _, l := range links {
 		out = append(out, Item{Selector: map[string]any{"url": l}, Label: l})
+	}
+	return out
+}
+
+// withSpec stamps every selector with the requested variant. The engine reads
+// video_variant_spec=original as "give me the untouched source file".
+func withSpec(items []Item, spec string) []Item {
+	out := make([]Item, 0, len(items))
+	for _, it := range items {
+		sel := make(map[string]any, len(it.Selector)+1)
+		for k, v := range it.Selector {
+			sel[k] = v
+		}
+		sel["video_variant_spec"] = spec
+		out = append(out, Item{Selector: sel, Label: it.Label})
 	}
 	return out
 }

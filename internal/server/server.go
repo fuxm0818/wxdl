@@ -509,6 +509,7 @@ func (p *Process) Start(proxyPort int) error {
 	cmd := exec.Command(p.bin, "server", "--config", p.cfgPath, "--workdir", p.workDir,
 		"--hostname", "127.0.0.1", "--port", strconv.Itoa(proxyPort))
 	cmd.Dir = p.workDir
+	cmd.SysProcAttr = detach()
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()

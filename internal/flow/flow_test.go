@@ -124,3 +124,17 @@ func TestFirstLineKeepsOneLineAndCountsCharacters(t *testing.T) {
 		t.Fatalf("rune count = %d (%q)", n, got)
 	}
 }
+
+func TestWithSpecDoesNotMutateInput(t *testing.T) {
+	in := []Item{{Selector: map[string]any{"url": "https://weixin.qq.com/sph/x"}, Label: "l"}}
+	out := withSpec(in, "original")
+	if out[0].Selector["video_variant_spec"] != "original" {
+		t.Fatalf("spec missing: %v", out[0].Selector)
+	}
+	if out[0].Selector["url"] != "https://weixin.qq.com/sph/x" || out[0].Label != "l" {
+		t.Fatalf("selector or label lost: %+v", out[0])
+	}
+	if _, leaked := in[0].Selector["video_variant_spec"]; leaked {
+		t.Fatal("withSpec mutated the caller's selector")
+	}
+}
