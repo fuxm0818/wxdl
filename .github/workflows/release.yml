@@ -64,6 +64,8 @@ jobs:
           wxdl                          # 自动读剪贴板里的视频号链接并批量下载
           wxdl get --file links.txt     # 从文件批量下载
           wxdl user "账号昵称" --limit 50
+          wxdl on                       # 常驻模式：视频号窗口出现「下载」按钮，wxdl off 结束
+          wxdl get <链接> --spec original   # 下载原始视频（不转码）
           \`\`\`
 
           **仅供学习研究。** wxdl 为 MIT 许可；随附的上游引擎是 MIT + "Commons Clause"，
