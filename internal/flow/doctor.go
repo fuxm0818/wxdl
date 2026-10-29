@@ -95,10 +95,18 @@ func (s *Session) Doctor() []Check {
 	} else {
 		add("API 端口", "fail", fmt.Sprintf("%d 被占用", s.Cfg.APIPort), "改 ~/.wxdl/config.json 里的 api_port")
 	}
-	if sysinfo.PortFree(s.Cfg.ProxyPort) || proxy.Active(service, s.Cfg.ProxyPort) {
+	switch {
+	case s.cli.CaptureListener(s.Cfg.ProxyPort):
+		// A previous run left its own engine behind. wxdl reuses it instead of
+		// starting a second one, so this is not a blocker.
+		add("代理端口", "ok", fmt.Sprintf("127.0.0.1:%d 由 wxdl 引擎监听（上次没退出，会直接复用）", s.Cfg.ProxyPort), "")
+	case proxy.Active(service, s.Cfg.ProxyPort):
+		add("代理端口", "fail", fmt.Sprintf("系统代理指向 127.0.0.1:%d，但端口上已经没有程序在监听", s.Cfg.ProxyPort),
+			"你的网络此刻可能不通：先跑 wxdl undo 恢复，或直接重跑 wxdl 让它重新起引擎")
+	case sysinfo.PortFree(s.Cfg.ProxyPort):
 		add("代理端口", "ok", fmt.Sprintf("127.0.0.1:%d 可用", s.Cfg.ProxyPort), "")
-	} else {
-		add("代理端口", "fail", fmt.Sprintf("%d 被占用", s.Cfg.ProxyPort), "改 ~/.wxdl/config.json 里的 proxy_port")
+	default:
+		add("代理端口", "fail", fmt.Sprintf("%d 被其它程序占用", s.Cfg.ProxyPort), "改 ~/.wxdl/config.json 里的 proxy_port")
 	}
 
 	if engineAlive(s) {
