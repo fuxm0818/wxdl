@@ -1,0 +1,19 @@
+# Build output
+dist/
+build/
+packaging/cache/
+
+# Upstream engine archives are fetched at build time, never committed.
+*.zip
+*.tar.gz
+*_checksums.txt
+
+# macOS / editor noise
+.DS_Store
+._*
+.idea/
+.vscode/
+
+# Local scratch
+links.txt
+*.log

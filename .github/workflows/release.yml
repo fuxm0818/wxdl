@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 版本号，例如 v0.1.0
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: resolve version
+        id: ver
+        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" >>"$GITHUB_OUTPUT"
+
+      - name: build release archives
+        env:
+          WXDL_VERSION: ${{ steps.ver.outputs.version }}
+        run: ./packaging/package.sh "$WXDL_VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wxdl-${{ steps.ver.outputs.version }}
+          path: dist/*
+          retention-days: 30
+
+      - name: publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          . packaging/upstream.env
+          cat >notes.md <<EOF
+          ## wxdl $VERSION — 微信视频号批量下载（macOS）
+
+          下载对应机型的压缩包，解压后 \`sh install.sh\`：
+
+          | 机型 | 文件 |
+          | --- | --- |
+          | Apple Silicon (M1-M4) | \`wxdl_${VERSION}_darwin_arm64.tar.gz\` |
+          | Intel | \`wxdl_${VERSION}_darwin_x86_64.tar.gz\` |
+
+          包内已内置钉定版本的上游抓取引擎（\`${UPSTREAM_TAG}\`），首装无需访问 GitHub。
+
+          \`\`\`bash
+          wxdl                          # 自动读剪贴板里的视频号链接并批量下载
+          wxdl get --file links.txt     # 从文件批量下载
+          wxdl user "账号昵称" --limit 50
+          \`\`\`
+
+          **仅供学习研究。** wxdl 为 MIT 许可；随附的上游引擎是 MIT + "Commons Clause"，
+          因此本发行包及 wxdl 本身都不得出售。详见包内 LICENSE、LICENSE-upstream、
+          NOTICE-upstream.md。
+
+          校验：\`shasum -a 256 -c wxdl_${VERSION}_checksums.txt\`
+          EOF
+
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" dist/*.tar.gz dist/*_checksums.txt notes.md --clobber
+          else
+            gh release create "$VERSION" \
+              dist/*.tar.gz dist/*_checksums.txt notes.md \
+              --title "wxdl $VERSION" \
+              --notes-file notes.md
+          fi

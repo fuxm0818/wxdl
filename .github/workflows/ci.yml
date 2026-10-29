@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          sources="$(find . -name '*.go')"
+          unformatted="$(gofmt -l $sources)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./...
+
+      - name: build both mac architectures
+        run: |
+          for arch in arm64 amd64; do
+            CGO_ENABLED=0 GOOS=darwin GOARCH=$arch \
+              go build -trimpath -o "dist/wxdl_darwin_$arch" .
+          done
+          ls -l dist
+
+      - name: verify pinned upstream assets
+        # Re-checks the hashes recorded in packaging/upstream.env against the
+        # real upstream release, so a renamed or tampered asset breaks here
+        # rather than on a user's machine.
+        run: ./packaging/fetch-upstream.sh
