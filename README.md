@@ -92,8 +92,8 @@ wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOK
 
    | 你的机器 | 文件 |
    | --- | --- |
-   | Apple Silicon（M1/M2/M3/M4） | `wxdl_v1.0.1_darwin_arm64.tar.gz` |
-   | Intel | `wxdl_v1.0.1_darwin_x86_64.tar.gz` |
+   | Apple Silicon（M1/M2/M3/M4） | `wxdl_v1.0.2_darwin_arm64.tar.gz` |
+   | Intel | `wxdl_v1.0.2_darwin_x86_64.tar.gz` |
 
    文件名里的版本号以 Release 页面实际列出的最新一版为准。
 
@@ -103,7 +103,7 @@ wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOK
 2. 双击压缩包解压，打开「终端」App，进去解压出来的目录并跑安装脚本：
 
    ```bash
-   cd ~/Downloads/wxdl_v1.0.1_darwin_arm64
+   cd ~/Downloads/wxdl_v1.0.2_darwin_arm64
    sh install.sh
    ```
 
