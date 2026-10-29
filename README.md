@@ -1,9 +1,17 @@
 # wxdl
 
-微信视频号短视频**批量**下载命令行工具（macOS）。
+微信视频号短视频**批量**下载（macOS），两种用法：
 
-复制几条视频号链接 → 一条命令 → 全部下到本地。不用打开网页、不用一个个点下载按钮、
-不用懂抓包：环境自检、下载引擎、根证书、系统代理、任务创建、进度显示、收尾恢复，全自动完成。
+- **桌面 App（推荐）**：下载 DMG，把 `wxdl.app` 拖进「应用程序」，双击打开——
+  粘贴链接、点按钮，有任务列表、实时日志和运行状态。常驻模式也在里面（「窗口按钮」标签）。
+- **命令行**：`wxdl get <链接...>` 一条命令批量下完，适合脚本和定时任务；App 里跑的就是它。
+
+![wxdl 桌面 App](docs/gui.png)
+
+不用打开网页、不用一个个点下载按钮、不用懂抓包：环境自检、下载引擎、根证书、系统代理、
+任务创建、进度显示、收尾恢复，App 和命令行都是全自动完成。
+
+命令行则是这样：
 
 ```bash
 wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOKvyzzI"
@@ -34,6 +42,7 @@ wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOK
 - [它解决什么](#它解决什么)
 - [支持范围](#支持范围)
 - [安装](#安装)
+- [桌面 App 怎么用](#桌面-app-怎么用)
 - [第一次使用（5 分钟）](#第一次使用5-分钟)
 - [使用示例](#使用示例)
 - [参数一览](#参数一览)
@@ -54,18 +63,26 @@ wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOK
 
 | 你想要的 | wxdl 的用法 |
 | --- | --- |
-| 一次下几十条链接 | `wxdl get <链接1> <链接2> ...` 或 `wxdl get --file links.txt` |
-| 微信里复制了链接，懒得打字 | 直接 `wxdl`（自动读剪贴板），或双击桌面图标 |
-| 某个账号最近的视频全下 | `wxdl user "账号昵称" --limit 50` |
-| 同事完全不用命令行 | 桌面双击「批量下载视频号视频.command」 |
-| 想像上游一样，在视频号窗口里点「下载」按钮 | `wxdl on` 常驻模式，窗口里就出现按钮（悬停可选原始视频/清晰度）；`wxdl off` 收工 |
-| 下原始视频，而不是转码版 | `wxdl get <链接> --spec original`，或常驻模式下在按钮菜单里点「原始视频」 |
+| 完全不想碰终端 | 装 `wxdl.app`：粘贴链接 → 点「开始下载」，进度、日志、状态都在窗口里 |
+| 一次下几十条链接 | App 里整段粘贴；命令行 `wxdl get <链接1> <链接2> ...` 或 `wxdl get --file links.txt` |
+| 微信里复制了链接，懒得打字 | App 里点「从剪贴板粘贴」；命令行直接 `wxdl`（自动读剪贴板） |
+| 某个账号最近的视频全下 | App「整个账号」标签；命令行 `wxdl user "账号昵称" --limit 50` |
+| 同事完全不用命令行 | 把 App 给他，三步点完 |
+| 想像上游一样，在视频号窗口里点「下载」按钮 | App 的「窗口按钮」标签点「开启下载按钮」；命令行 `wxdl on`，用完 `wxdl off` |
+| 下原始视频，而不是转码版 | App 里勾「下载原始视频」；命令行 `wxdl get <链接> --spec original` |
 | 中途 Ctrl-C / 断电不能坏网络 | 自动恢复系统代理，也可 `wxdl undo` 手动救 |
 | 换一台 Mac 接着用 | Release 包里已内置引擎，首装不必访问 GitHub |
 
 ## 支持范围
 
-**目前只支持 macOS（要求 11 Big Sur 及以上；更低版本 `wxdl doctor` 只给警告，不保证可用。Intel 与 Apple Silicon 都支持）。**
+**目前只支持 macOS，Intel 与 Apple Silicon 都有包。**
+
+- 桌面 App：要求 **macOS 12 Monterey 及以上**（本轮在 macOS 26 + Apple Silicon 上实测；
+  Intel 包在本机经 Rosetta 启动验证过，但真实 Intel Mac 上尚未跑通完整下载流程）。
+- 命令行：要求 **macOS 11 Big Sur 及以上**；更低版本 `wxdl doctor` 只给警告，不保证可用。
+
+> macOS 26 起，系统会提示「Intel 芯片 App 的支持即将结束」。这是 Apple 在逐步淘汰 Rosetta：
+> Apple Silicon 用户请下载 `arm64` 包；`x86_64` 包只给真正的 Intel Mac 用。
 
 原因很直白：微信视频号的视频是加密的，解密 key 只出现在本机微信与腾讯服务器的接口响应里，
 所以工具必须临时接管**系统代理**并让系统**信任一个本机根证书**。这两件事在每个系统上的做法完全不同
@@ -82,28 +99,52 @@ wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOK
 - 本机装有 **微信 Mac 版并已登录**（视频号页面必须能在微信里打开）。
 - 你有这台电脑的**管理员密码**（安装脚本本身不用密码；第一次下载时要信任根证书、改系统代理，
   那一步绕不过去）。
-- 如果你的 Clash / Surge 等代理软件在跑，wxdl 会提示并请你确认是否退出它们（会抢系统代理）。
+- 如果你的 Clash / Surge 等代理软件在跑，**请先完全退出它们**（会抢系统代理）。
+  桌面 App 与 `--yes` 模式不会替你退出，只会明确报错，避免误关你的软件。
 
 ## 安装
 
-### 方式 A：下载 Release 产物（推荐，不需要装 Go）
+### 方式 A：桌面 App（推荐，下载 DMG）
 
-1. 打开 <https://github.com/fuxm0818/wxdl/releases>，下载对应机型的压缩包：
+1. 打开 <https://github.com/fuxm0818/wxdl/releases>，下载对应机型的 DMG：
 
    | 你的机器 | 文件 |
    | --- | --- |
-   | Apple Silicon（M1/M2/M3/M4） | `wxdl_v1.0.2_darwin_arm64.tar.gz` |
-   | Intel | `wxdl_v1.0.2_darwin_x86_64.tar.gz` |
+   | Apple Silicon（M1/M2/M3/M4） | `wxdl_v1.1.0_darwin_arm64.dmg` |
+   | Intel | `wxdl_v1.1.0_darwin_x86_64.dmg` |
 
    文件名里的版本号以 Release 页面实际列出的最新一版为准。
 
    不确定机型就点屏幕左上角的苹果菜单 → 「关于本机」：显示「芯片」并写着 M1/M2/M3/M4 的是
    Apple Silicon，显示「处理器」的是 Intel。
 
+2. 双击 DMG，把 `wxdl.app` 拖到旁边的「应用程序」文件夹。
+
+3. 第一次打开：在「应用程序」里 **右键 `wxdl.app` → 「打开」→ 再点一次「打开」**。
+   wxdl 目前没有 Apple 开发者签名（签名 + 公证要付费的开发者账号），所以系统会拦一次；
+   绕过这一次后就不再拦。也可以在终端执行：
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/wxdl.app
+   ```
+
+4. 打开就能用，操作见 [桌面 App 怎么用](#桌面-app-怎么用)。App 里已经带了命令行 `wxdl`
+   （`wxdl.app/Contents/Resources/bin/wxdl`），不需要再单独安装；想把它放进 `PATH`、或者只用终端，
+   继续看方式 B。
+
+### 方式 B：命令行包（tar.gz，不需要装 Go）
+
+1. 同样在 <https://github.com/fuxm0818/wxdl/releases> 下载压缩包：
+
+   | 你的机器 | 文件 |
+   | --- | --- |
+   | Apple Silicon（M1/M2/M3/M4） | `wxdl_v1.1.0_darwin_arm64.tar.gz` |
+   | Intel | `wxdl_v1.1.0_darwin_x86_64.tar.gz` |
+
 2. 双击压缩包解压，打开「终端」App，进去解压出来的目录并跑安装脚本：
 
    ```bash
-   cd ~/Downloads/wxdl_v1.0.2_darwin_arm64
+   cd ~/Downloads/wxdl_v1.1.0_darwin_arm64
    sh install.sh
    ```
 
@@ -131,7 +172,7 @@ wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOK
    wxdl 目前没有 Apple 开发者签名（签名 + 公证要付费的开发者账号），所以浏览器
    下载的文件默认都会被拦一次，清掉隔离属性后就不会再拦。
 
-### 方式 B：自己编译（需要 Go 1.23+，除标准库外零依赖）
+### 方式 C：自己编译（需要 Go 1.23+，除标准库外零依赖）
 
 ```bash
 git clone https://github.com/fuxm0818/wxdl.git
@@ -148,32 +189,64 @@ go build -trimpath \
   -o dist/wxdl .
 ```
 
+## 桌面 App 怎么用
+
+窗口左右两块：左边干活，右边看状态和日志。
+
+**批量链接**：把链接粘进文本框（整段聊天记录也行，会自动挑出 `weixin.qq.com/sph/…` 和
+`channels.weixin.qq.com/…`，重复的只算一条），也可以「从剪贴板粘贴」「从文件导入」；
+勾「下载原始视频（不转码）」就下不转码的版本。点「开始下载」，下方会出现进度条和逐条任务列表。
+
+**整个账号**：填账号昵称、username，或该账号任意一条视频链接，再选「最多下载 N 条」。
+
+**窗口按钮**：点「开启下载按钮」，微信视频号窗口里就会出现引擎注入的「下载」按钮
+（详情页底部悬浮按钮、首页右侧图标；鼠标悬停可选原始视频和各清晰度）。第一次用前先
+**Cmd+Q 完全退出微信**再打开。用完点「恢复网络」收工。
+
+几个需要知道的行为：
+
+- **下载目录**：默认 `~/Downloads/wxdl`，底部可以改；「打开文件夹」「在访达中显示」直接定位。
+- **管理员密码**：只在点「开始下载 / 开启下载按钮」时通过系统授权弹窗要一次；
+  App 不会在后台偷偷提权。
+- **停止**：下载中可点「停止」，会中断任务并恢复系统代理。
+- **关窗口 = 退出 App**：如果正在下载，App 会先中断任务、等 wxdl 恢复完代理再退出（最多十几秒）。
+- **常驻模式是"留在系统里"的**：「开启下载按钮」跑完会退出，但代理和引擎留在后台——
+  这时关掉 App 不会帮你恢复网络，记得回来点「恢复网络」（或在终端 `wxdl off`）。
+- **和命令行完全互通**：同一个下载目录、同一个引擎、同一把锁；App 里跑的就是
+  `wxdl get` / `wxdl user` / `wxdl on`，参数与行为一致。
+
 ## 第一次使用（5 分钟）
 
-下面这段是**唯一需要记住的流程**，之后每次都用同样的命令。
+### 用桌面 App
 
 1. **复制链接**：在微信里打开视频号，对想下载的视频点「分享 → 复制链接」，多条就逐条复制
-   （wxdl 支持一次传多条，也支持整段文字里自动识别）。
-2. **跑命令**（或跳到第 5 步用双击）：
-
-   ```bash
-   wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOKvyzzI"
-   ```
-3. **输一次管理员密码**：弹窗说明它要做什么——信任 wxdl 本机根证书 + 把系统 HTTP/HTTPS 代理
-   指向 `127.0.0.1:2023`，两个动作合在一个框里，只输一次。
-4. **⚠️ 完全退出微信再重开**（这是第一次最容易卡住的一步）：微信内置浏览器会缓存旧的代理设置，
+   （App 支持整段文字里自动识别、自动去重）。
+2. **打开 wxdl.app**，在「批量链接」里粘贴，点「开始下载」。
+3. **输一次管理员密码**：系统弹窗会说明它要做什么——信任 wxdl 本机根证书 + 把系统 HTTP/HTTPS
+   代理指向 `127.0.0.1:2023`；两个动作合在一个框里，只输一次。
+4. **⚠️ 完全退出微信再重开**（第一次最容易卡住的一步）：微信内置浏览器会缓存旧的代理设置，
    必须 **Cmd+Q 彻底退出微信**（不是关窗口），重新打开后进「视频号」、随便点开一条视频并保持页面开着。
-   wxdl 检测到页面连上就自动继续下载；它也会弹窗问你「要不要我帮你重启微信并重试」。
-5. **或者双击**：桌面上「批量下载视频号视频.command」——它会自动读取你剪贴板里的视频号链接并开始批量下载，
-   全程不用敲命令，适合不熟悉终端的同事。
+   右侧「视频号页面」变成「已连接」后会自动继续下载。
+5. 跑完后 App 会恢复系统代理、停掉引擎、在访达里定位到最后一个文件。
+   视频默认放在 **`~/Downloads/wxdl`**。
 
-跑完后 wxdl 会自动把系统代理恢复成你原来的设置、停掉引擎、在访达里打开下载目录。
-视频默认放在 **`~/Downloads/wxdl`**。
+第二次开始，只要根证书还信任着、代理没被别的软件抢走，**不会再弹密码**。
+如果之前恢复过代理（App 里点过「恢复网络」，或命令行 `wxdl undo`），下一次会再要一次密码——这是 macOS 的机制，不是 bug。
 
-第二次开始，只要根证书还信任着、代理没被别的软件抢走，**不会再弹密码**（除第一次之外的每次运行都不需要重新授权）。
-如果之前跑过 `wxdl undo` 把代理还原了，下一次运行会再要一次密码——这是 macOS 的机制，不是 bug。
+### 用命令行
+
+同样的流程，把第 2 步换成：
+
+```bash
+wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOKvyzzI"
+```
+
+也可以直接 `wxdl`（读剪贴板）。装命令行包时 `install.sh` 会在桌面创建
+「批量下载视频号视频.command」，双击同样能跑。
 
 ## 使用示例
+
+下面都是命令行用法。桌面 App 里每个按钮对应的就是这些命令，参数效果完全一样。
 
 ### 1）若干条链接（最常用）
 
@@ -386,6 +459,23 @@ wxdl help                          # 用法说明
 
 ## 常见问题
 
+**双击 App 提示「Apple 无法验证“wxdl”是否包含恶意软件」？**
+没有 Apple 开发者签名和公证，这是常规拦截。在「应用程序」里右键 `wxdl.app` → 「打开」→ 再点「打开」，
+或者执行 `xattr -dr com.apple.quarantine /Applications/wxdl.app`。只需要绕过一次。
+
+**双击 App 没反应 / 窗口打不开？**
+先确认系统是 macOS 12 及以上；然后在终端跑 `open /Applications/wxdl.app` 看报错信息。
+如果是 Apple Silicon 机器装成了 `x86_64` 包，系统会通过 Rosetta 运行，macOS 26 还会提示
+「Intel 芯片 App 的支持即将结束」——这不是 wxdl 的问题，换 `arm64` 包即可。
+
+**关掉 App 窗口，正在下载的任务会怎样？**
+会中断。App 会先让 wxdl 停下任务、恢复系统代理，然后才退出（最多等十几秒），
+不会把网络留在坏状态；想让它跑完就别关窗口。
+
+**App 和命令行能一起用吗？**
+可以，两者共用同一个下载目录和引擎，但不能真正同时跑两个任务（同一把文件锁）。
+常驻模式开着的时候，命令行请用 `wxdl get … --keep`，否则跑完会把常驻一起收掉。
+
 **点视频号图标后页面一片空白、像连不上网？**
 正常现象：微信内置浏览器还在用旧的代理设置。在微信里 **Cmd+Q 完全退出**（不是关窗口），
 重新打开 → 进视频号 → 点开任意一条视频。之后 wxdl 会自动继续，以后每次运行都不用再重启。
@@ -522,11 +612,18 @@ wxdl（本项目：批量/零配置/恢复保障）
 gofmt -l .          # 必须无输出
 go vet ./...
 go test ./...       # 纯逻辑单测，不联网、不改系统设置
-./packaging/package.sh v1.0.0   # 本地打全产物（会先跑上面三步）
+
+./packaging/package.sh v1.1.0       # 命令行包（tar.gz，任意平台可交叉编译）
+./packaging/package-gui.sh v1.1.0   # 桌面 App + DMG（需要 macOS + Xcode 命令行工具）
 ```
+
+`package-gui.sh` 会交叉编译两个架构的 Go CLI 与 SwiftUI 外壳、生成图标、做 ad-hoc 签名，
+最后包成带「应用程序」快捷方式的 DMG。产物都在 `dist/`。
 
 代码分层：
 
+- `gui/` SwiftUI 桌面 App：界面、任务列表、日志；实际动作用 `Process` 调包内 `bin/wxdl`
+- `packaging/gui/make-icon.swift` 用 AppKit 画图标并生成 `.icns`
 - `internal/cfg` 配置与目录布局（0700/0600 权限在这里集中落实）
 - `internal/upstream` 引擎下载、sha256 校验、Release 包内置发现
 - `internal/proxy` 系统代理与证书状态机（快照 / 恢复 / 幂等）
@@ -540,8 +637,8 @@ go test ./...       # 纯逻辑单测，不联网、不改系统设置
 并重新校验 `packaging/upstream.env` 里钉定的上游包 sha256。打 tag 即自动出 Release：
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0     # 触发 release.yml：打包两个架构 + 内置引擎 + 校验和
+git tag v1.1.0
+git push origin v1.1.0     # 触发 release.yml：macOS 出两个 DMG，Linux 出两个 tar.gz，合并校验和
 ```
 
 换上游版本时改 `packaging/upstream.env` 里的 `UPSTREAM_TAG` 与两个 `UPSTREAM_SHA_*`，

@@ -53,3 +53,24 @@ jobs:
         # real upstream release, so a renamed or tampered asset breaks here
         # rather than on a user's machine.
         run: ./packaging/fetch-upstream.sh
+
+  gui:
+    # The desktop shell is Swift: compile it for both deployment targets on
+    # every push so a Swift breakage never waits for a release tag.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: compile SwiftUI app
+        run: |
+          mkdir -p dist
+          for target in arm64 x86_64; do
+            swiftc -O -whole-module-optimization -parse-as-library -swift-version 5 \
+              -target "${target}-apple-macos12.0" \
+              -framework SwiftUI -framework AppKit \
+              gui/*.swift -o "dist/wxdl-gui-${target}"
+          done
+          ls -l dist
+
+      - name: build icon
+        run: swift packaging/gui/make-icon.swift build/AppIcon.icns

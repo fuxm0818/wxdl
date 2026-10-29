@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 版本号，例如 v1.0.0
+        description: 版本号，例如 v1.1.0
         required: true
 
 permissions:
@@ -17,7 +17,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  package:
+  gui:
+    # The desktop app needs a real macOS toolchain: swiftc, iconutil, codesign,
+    # hdiutil. Both architectures are cross-built on one runner.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: resolve version
+        id: ver
+        run: echo "version=${{ github.event.inputs.version || github.ref_name }}" >>"$GITHUB_OUTPUT"
+
+      - name: build DMGs
+        env:
+          WXDL_VERSION: ${{ steps.ver.outputs.version }}
+        run: ./packaging/package-gui.sh "$WXDL_VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wxdl-gui-${{ steps.ver.outputs.version }}
+          path: |
+            dist/*.dmg
+            dist/*_gui_checksums.txt
+          retention-days: 30
+
+  cli:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,27 +67,58 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wxdl-${{ steps.ver.outputs.version }}
-          path: dist/*
+          name: wxdl-cli-${{ steps.ver.outputs.version }}
+          path: |
+            dist/*.tar.gz
+            dist/*_checksums.txt
           retention-days: 30
+
+  publish:
+    needs: [gui, cli]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wxdl-*-${{ github.event.inputs.version || github.ref_name }}
+          merge-multiple: true
+          path: dist
 
       - name: publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.ver.outputs.version }}
+          VERSION: ${{ github.event.inputs.version || github.ref_name }}
         run: |
           . packaging/upstream.env
+
+          # One checksum file for every asset, so users only verify once.
+          cat "dist/wxdl_${VERSION}_checksums.txt" "dist/wxdl_${VERSION}_gui_checksums.txt" \
+            | sort > "dist/checksums.merged"
+          mv "dist/checksums.merged" "dist/wxdl_${VERSION}_checksums.txt"
+          rm -f "dist/wxdl_${VERSION}_gui_checksums.txt"
+
           cat >notes.md <<EOF
-          ## wxdl $VERSION — 微信视频号批量下载（macOS）
+          ## wxdl $VERSION — 微信视频号批量下载（macOS 桌面 App）
 
-          下载对应机型的压缩包，解压后 \`sh install.sh\`：
+          ![界面](https://raw.githubusercontent.com/fuxm0818/wxdl/main/docs/gui.png)
 
-          | 机型 | 文件 |
+          | 你的机器 | 下载 |
           | --- | --- |
-          | Apple Silicon (M1-M4) | \`wxdl_${VERSION}_darwin_arm64.tar.gz\` |
-          | Intel | \`wxdl_${VERSION}_darwin_x86_64.tar.gz\` |
+          | Apple Silicon（M1-M4） | \`wxdl_${VERSION}_darwin_arm64.dmg\` |
+          | Intel | \`wxdl_${VERSION}_darwin_x86_64.dmg\` |
 
-          包内已内置钉定版本的上游抓取引擎（\`${UPSTREAM_TAG}\`），首装无需访问 GitHub。
+          打开 DMG，把 **wxdl.app** 拖进「应用程序」。第一次打开请在访达里右键 App → 「打开」→ 再点「打开」
+          （没有 Apple 开发者签名，系统会拦一次）。之后每次双击就能用：
+
+          - **批量链接**：粘贴视频号链接（支持整段文字自动挑链接）→ 开始下载
+          - **整个账号**：填昵称 / username / 任意一条该账号的视频链接
+          - **窗口按钮**：开启后视频号窗口里出现「下载」按钮，悬停可选原始视频和清晰度；用完点「恢复网络」
+
+          包内已内置钉定版本的上游抓取引擎（\`${UPSTREAM_TAG}\`），首次运行无需联网下载引擎。
+
+          **只用命令行的话**，可以下载同样的 \`wxdl_${VERSION}_darwin_arm64.tar.gz\` / \`_x86_64.tar.gz\`，
+          解压后 \`sh install.sh\`。
 
           \`\`\`bash
           wxdl                          # 自动读剪贴板里的视频号链接并批量下载
@@ -76,10 +136,11 @@ jobs:
           EOF
 
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            gh release upload "$VERSION" dist/*.tar.gz dist/*_checksums.txt notes.md --clobber
+            gh release upload "$VERSION" \
+              dist/*.dmg dist/*.tar.gz dist/wxdl_${VERSION}_checksums.txt notes.md --clobber
           else
             gh release create "$VERSION" \
-              dist/*.tar.gz dist/*_checksums.txt notes.md \
+              dist/*.dmg dist/*.tar.gz dist/wxdl_${VERSION}_checksums.txt notes.md \
               --title "wxdl $VERSION" \
               --notes-file notes.md
           fi
