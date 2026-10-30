@@ -208,7 +208,7 @@ struct ServePane: View {
             VStack(alignment: .leading, spacing: 7) {
                 StepText(number: "1", text: "首次使用先 Cmd+Q 完全退出微信，再打开视频号页面。")
                 StepText(number: "2", text: "点「开启下载按钮」；第一次会要一次管理员密码（安装本机证书 + 改系统代理）。")
-                StepText(number: "3", text: "用完点「恢复网络」。常驻期间流量会经过本机代理。")
+                StepText(number: "3", text: "用完点「恢复网络」；直接退出 App（⌘Q 或关窗口）也会先自动恢复。常驻期间流量会经过本机代理。")
             }
             Divider()
             HStack(spacing: 10) {
@@ -255,7 +255,7 @@ struct ProgressPane: View {
                         .monospacedDigit()
                         .foregroundColor(.secondary)
                 }
-                if model.isRunning && model.pageWait == nil {
+                if model.isRunning && model.pageWait == nil && !model.quitting {
                     Button("停止") { model.cancel() }
                         .buttonStyle(.bordered)
                         .controlSize(.small)

@@ -109,6 +109,7 @@ final class AppModel: ObservableObject {
     @Published var tasks: [DownloadTask] = []
     @Published var log = ""
     @Published var isRunning = false
+    @Published var quitting = false
     @Published var runTitle = ""
     @Published var progressDone = 0.0
     @Published var progressTotal = 0.0
@@ -129,7 +130,7 @@ final class AppModel: ObservableObject {
     private var lastErrorHint: String?
     private var statusProcess: Process?
     private var pendingKind: RunKind = .other
-    private var shutdownCompletion: (() -> Void)?
+    private var terminationCompletion: ((Bool) -> Void)?
     private var summary: RunSummary?
     private var doctorFails = 0
     private var restoreFailed = false
@@ -203,16 +204,34 @@ final class AppModel: ObservableObject {
         refreshStatus()
     }
 
-    func shutdown(completion: @escaping () -> Void) {
-        guard let running = process, isRunning else {
-            completion()
-            return
+    /// Prepares the app for Cmd+Q / window close. Returns true when cleanup is
+    /// in flight; `completion(true)` means quit, `completion(false)` means the
+    /// proxy could not be restored so the app must stay open.
+    func prepareForTermination(_ completion: @escaping (Bool) -> Void) -> Bool {
+        if terminationCompletion != nil { return true }
+        if isRunning {
+            guard let running = process else {
+                DispatchQueue.main.async { completion(true) }
+                return true
+            }
+            terminateAfterRun(running, completion)
+            return true
         }
+        // The cached snapshot can be minutes old (or missing right after
+        // launch), and quitting with the proxy still pointing at wxdl leaves
+        // the machine offline, so ask the CLI right now.
+        guard currentProxyIsOurs() else { return false }
+        restoreThenTerminate(completion)
+        return true
+    }
+
+    private func terminateAfterRun(_ running: Process, _ completion: @escaping (Bool) -> Void) {
+        terminationCompletion = completion
+        quitting = true
         cancelled = true
-        shutdownCompletion = completion
-        activity = "正在停止并恢复网络设置…"
+        activity = "正在停止任务并恢复系统代理…"
         pageWait = nil
-        appendLog("· 正在停止并恢复系统代理 …")
+        appendLog("· 正在停止任务并恢复系统代理 …")
         running.interrupt()
         // Restoring the proxy can raise an administrator prompt; killing the
         // child before the user answers would leave the system proxy pointed at
@@ -222,10 +241,55 @@ final class AppModel: ObservableObject {
             current.terminate()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 75) { [weak self] in
-            guard let self, let finish = self.shutdownCompletion else { return }
-            self.shutdownCompletion = nil
-            finish()
+            guard let self, self.terminationCompletion != nil else { return }
+            // Never quit on an unconfirmed restore: leave the app up so the
+            // user can retry or fix the proxy by hand.
+            self.finishTermination(false)
         }
+    }
+
+    private func restoreThenTerminate(_ completion: @escaping (Bool) -> Void) {
+        terminationCompletion = completion
+        quitting = true
+        activity = "正在恢复系统代理…"
+        appendLog("· 退出前恢复系统代理 …")
+        run(args: ["off", "--yes"], title: "恢复系统网络", kind: .off)
+    }
+
+    private func finishTermination(_ allow: Bool) {
+        guard let finish = terminationCompletion else { return }
+        terminationCompletion = nil
+        quitting = false
+        finish(allow)
+    }
+
+    private func currentProxyIsOurs() -> Bool {
+        if statusProcess != nil { return status.proxyIsOurs }
+        guard let executable = cliURL else { return status.proxyIsOurs }
+        let child = Process()
+        child.executableURL = executable
+        child.arguments = ["status", "--json"]
+        child.environment = cliEnvironment()
+        let output = Pipe()
+        child.standardOutput = output
+        child.standardError = Pipe()
+        do {
+            try child.run()
+        } catch {
+            return status.proxyIsOurs
+        }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        child.waitUntilExit()
+        guard child.terminationStatus == 0,
+              let text = String(data: data, encoding: .utf8) else { return status.proxyIsOurs }
+        for line in text.split(separator: "\n") {
+            guard let raw = line.data(using: .utf8),
+                  let parsed = try? JSONSerialization.jsonObject(with: raw),
+                  let obj = parsed as? [String: Any],
+                  obj["t"] as? String == "status" else { continue }
+            return boolValue(obj, "proxy_is_ours")
+        }
+        return status.proxyIsOurs
     }
 
     // MARK: - Input helpers
@@ -344,7 +408,7 @@ final class AppModel: ObservableObject {
     }
 
     func cancel() {
-        guard let running = process, isRunning, !cancelled else { return }
+        guard let running = process, isRunning, !cancelled, !quitting else { return }
         cancelled = true
         activity = "正在停止并恢复网络设置…"
         appendLog("· 正在停止并恢复网络 …")
@@ -380,18 +444,22 @@ final class AppModel: ObservableObject {
     private func run(args: [String], title: String, kind: RunKind) {
         guard !isRunning else {
             notify(.info, "上一个任务还在跑，等它结束或点「停止」。")
+            if terminationCompletion != nil { finishTermination(false) }
             return
         }
         guard let executable = cliURL else {
             notify(.error, "应用包里的 wxdl 命令行不见了，请重新下载安装包。")
+            if terminationCompletion != nil { finishTermination(false) }
             return
         }
         var fullArgs = args
         if !fullArgs.contains("--json") { fullArgs.append("--json") }
 
-        tasks = []
-        progressDone = 0
-        progressTotal = 0
+        if !quitting {
+            tasks = []
+            progressDone = 0
+            progressTotal = 0
+        }
         lastError = nil
         lastErrorHint = nil
         cancelled = false
@@ -435,6 +503,7 @@ final class AppModel: ObservableObject {
         } catch {
             isRunning = false
             notify(.error, "启动 wxdl 失败：\(error.localizedDescription)")
+            if terminationCompletion != nil { finishTermination(false) }
             return
         }
         process = child
@@ -473,6 +542,8 @@ final class AppModel: ObservableObject {
         isRunning = false
         activity = ""
         pageWait = nil
+        let wasCancelled = cancelled
+        let failedRestore = restoreFailed
 
         if cancelled {
             for index in tasks.indices where tasks[index].state == .running {
@@ -522,9 +593,13 @@ final class AppModel: ObservableObject {
             }
             notify(.error, message)
         }
-        if let finish = shutdownCompletion {
-            shutdownCompletion = nil
-            finish()
+        if terminationCompletion != nil {
+            // A restore that could not be confirmed keeps the app open; the
+            // banner above tells the user what to do next.
+            let allow = wasCancelled
+                ? !failedRestore
+                : completed.terminationStatus == 0 && !failedRestore
+            finishTermination(allow)
             return
         }
         refreshStatus()
@@ -569,7 +644,7 @@ final class AppModel: ObservableObject {
         case "run.start":
             let total = intValue(obj, "total")
             if total > 0 { progressTotal = Double(total) }
-            activity = "正在准备运行环境…"
+            activity = quitting ? "正在恢复系统代理…" : "正在准备运行环境…"
             appendLog("· 开始：\(stringValue(obj, "cmd"))，\(total > 0 ? "\(total) 条" : "待确认数量")")
         case "run.plan":
             progressTotal = Double(intValue(obj, "total"))

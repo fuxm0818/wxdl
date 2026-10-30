@@ -122,8 +122,8 @@ wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOK
 
    | 你的机器 | 文件 |
    | --- | --- |
-   | Apple Silicon（M1/M2/M3/M4） | `wxdl_v1.2.0_darwin_arm64.dmg` |
-   | Intel | `wxdl_v1.2.0_darwin_x86_64.dmg` |
+   | Apple Silicon（M1/M2/M3/M4） | `wxdl_v1.2.1_darwin_arm64.dmg` |
+   | Intel | `wxdl_v1.2.1_darwin_x86_64.dmg` |
 
    文件名里的版本号以 Release 页面实际列出的最新一版为准。
 
@@ -150,13 +150,13 @@ wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOK
 
    | 你的机器 | 文件 |
    | --- | --- |
-   | Apple Silicon（M1/M2/M3/M4） | `wxdl_v1.2.0_darwin_arm64.tar.gz` |
-   | Intel | `wxdl_v1.2.0_darwin_x86_64.tar.gz` |
+   | Apple Silicon（M1/M2/M3/M4） | `wxdl_v1.2.1_darwin_arm64.tar.gz` |
+   | Intel | `wxdl_v1.2.1_darwin_x86_64.tar.gz` |
 
 2. 双击压缩包解压，打开「终端」App，进去解压出来的目录并跑安装脚本：
 
    ```bash
-   cd ~/Downloads/wxdl_v1.2.0_darwin_arm64
+   cd ~/Downloads/wxdl_v1.2.1_darwin_arm64
    sh install.sh
    ```
 
@@ -226,9 +226,11 @@ go build -trimpath \
 - **等微信页面不再超时**：App 用 `--wait-page=forever`，卡住时会显示「等待微信视频号页面」
   卡片和已等待时间；按里面的 1-2-3 重启微信并打开视频号后会自动继续，只有点
   「停止并恢复网络」才会结束。
-- **关窗口 = 退出 App**：如果正在下载，App 会先中断任务、等 wxdl 恢复完代理再退出（最多十几秒）。
-- **常驻模式是"留在系统里"的**：「开启下载按钮」跑完会退出，但代理和引擎留在后台——
-  这时关掉 App 不会帮你恢复网络，记得回来点「恢复网络」（或在终端 `wxdl off`）。
+- **退出 App 会自动收尾**：`⌘Q` 或关窗口时，如果正在下载，App 会先中断任务、等 wxdl
+  恢复完代理再退出（最多十几秒）；如果只是常驻模式开着，也会先跑一次 `wxdl off` 再退出，
+  不会把代理留在后台。
+- **恢复失败不会静默退出**：退出时如果没能恢复系统代理（比如取消了管理员授权），App 会
+  留下来并弹窗，可以「重试恢复」，或确认网络正常后选「仍然退出」。
 - **和命令行完全互通**：同一个下载目录、同一个引擎、同一把锁；App 里跑的就是
   `wxdl get` / `wxdl user` / `wxdl on`，参数与行为一致。
 
@@ -519,7 +521,8 @@ wxdl get links.txt --yes --json
 
 **关掉 App 窗口，正在下载的任务会怎样？**
 会中断。App 会先让 wxdl 停下任务、恢复系统代理，然后才退出（最多等十几秒），
-不会把网络留在坏状态；想让它跑完就别关窗口。
+不会把网络留在坏状态；想让它跑完就别关窗口。只是常驻模式开着、没有任务在跑时，
+`⌘Q` 或关窗口同样会先自动 `wxdl off` 再退出，不需要手动点「恢复网络」。
 
 **App 和命令行能一起用吗？**
 可以，两者共用同一个下载目录和引擎，但不能真正同时跑两个任务（同一把文件锁）。
@@ -748,8 +751,8 @@ gofmt -l .          # 必须无输出
 go vet ./...
 go test ./...       # 纯逻辑单测，不联网、不改系统设置
 
-./packaging/package.sh v1.2.0       # 命令行包（tar.gz，任意平台可交叉编译）
-./packaging/package-gui.sh v1.2.0   # 桌面 App + DMG（需要 macOS + Xcode 命令行工具）
+./packaging/package.sh v1.2.1       # 命令行包（tar.gz，任意平台可交叉编译）
+./packaging/package-gui.sh v1.2.1   # 桌面 App + DMG（需要 macOS + Xcode 命令行工具）
 ```
 
 `package-gui.sh` 会交叉编译两个架构的 Go CLI 与 SwiftUI 外壳、生成图标、做 ad-hoc 签名，
@@ -766,8 +769,8 @@ go test ./...       # 纯逻辑单测，不联网、不改系统设置
 并重新校验 `packaging/upstream.env` 里钉定的上游包 sha256。打 tag 即自动出 Release：
 
 ```bash
-git tag v1.2.0
-git push origin v1.2.0     # 触发 release.yml：macOS 出两个 DMG，Linux 出两个 tar.gz，合并校验和
+git tag v1.2.1
+git push origin v1.2.1     # 触发 release.yml：macOS 出两个 DMG，Linux 出两个 tar.gz，合并校验和
 ```
 
 换上游版本时改 `packaging/upstream.env` 里的 `UPSTREAM_TAG` 与两个 `UPSTREAM_SHA_*`，
