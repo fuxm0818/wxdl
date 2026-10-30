@@ -122,8 +122,8 @@ wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOK
 
    | 你的机器 | 文件 |
    | --- | --- |
-   | Apple Silicon（M1/M2/M3/M4） | `wxdl_v1.1.0_darwin_arm64.dmg` |
-   | Intel | `wxdl_v1.1.0_darwin_x86_64.dmg` |
+   | Apple Silicon（M1/M2/M3/M4） | `wxdl_v1.2.0_darwin_arm64.dmg` |
+   | Intel | `wxdl_v1.2.0_darwin_x86_64.dmg` |
 
    文件名里的版本号以 Release 页面实际列出的最新一版为准。
 
@@ -150,13 +150,13 @@ wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOK
 
    | 你的机器 | 文件 |
    | --- | --- |
-   | Apple Silicon（M1/M2/M3/M4） | `wxdl_v1.1.0_darwin_arm64.tar.gz` |
-   | Intel | `wxdl_v1.1.0_darwin_x86_64.tar.gz` |
+   | Apple Silicon（M1/M2/M3/M4） | `wxdl_v1.2.0_darwin_arm64.tar.gz` |
+   | Intel | `wxdl_v1.2.0_darwin_x86_64.tar.gz` |
 
 2. 双击压缩包解压，打开「终端」App，进去解压出来的目录并跑安装脚本：
 
    ```bash
-   cd ~/Downloads/wxdl_v1.1.0_darwin_arm64
+   cd ~/Downloads/wxdl_v1.2.0_darwin_arm64
    sh install.sh
    ```
 
@@ -748,8 +748,8 @@ gofmt -l .          # 必须无输出
 go vet ./...
 go test ./...       # 纯逻辑单测，不联网、不改系统设置
 
-./packaging/package.sh v1.1.0       # 命令行包（tar.gz，任意平台可交叉编译）
-./packaging/package-gui.sh v1.1.0   # 桌面 App + DMG（需要 macOS + Xcode 命令行工具）
+./packaging/package.sh v1.2.0       # 命令行包（tar.gz，任意平台可交叉编译）
+./packaging/package-gui.sh v1.2.0   # 桌面 App + DMG（需要 macOS + Xcode 命令行工具）
 ```
 
 `package-gui.sh` 会交叉编译两个架构的 Go CLI 与 SwiftUI 外壳、生成图标、做 ad-hoc 签名，
@@ -766,8 +766,8 @@ go test ./...       # 纯逻辑单测，不联网、不改系统设置
 并重新校验 `packaging/upstream.env` 里钉定的上游包 sha256。打 tag 即自动出 Release：
 
 ```bash
-git tag v1.1.0
-git push origin v1.1.0     # 触发 release.yml：macOS 出两个 DMG，Linux 出两个 tar.gz，合并校验和
+git tag v1.2.0
+git push origin v1.2.0     # 触发 release.yml：macOS 出两个 DMG，Linux 出两个 tar.gz，合并校验和
 ```
 
 换上游版本时改 `packaging/upstream.env` 里的 `UPSTREAM_TAG` 与两个 `UPSTREAM_SHA_*`，
