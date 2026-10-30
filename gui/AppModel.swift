@@ -6,6 +6,7 @@ struct DownloadTask: Identifiable, Equatable {
     enum State: Equatable {
         case running
         case done
+        case skipped
         case failed
     }
 
@@ -14,6 +15,13 @@ struct DownloadTask: Identifiable, Equatable {
     var title: String
     var state: State
     var detail: String = ""
+    var path: String = ""
+    var pct: Double = 0
+    var bytes: Int64 = 0
+    var totalBytes: Int64 = 0
+    var phase: String = "queued"
+    var errorCode: String = ""
+    var hint: String = ""
 }
 
 struct StatusSnapshot: Equatable {
@@ -25,12 +33,32 @@ struct StatusSnapshot: Equatable {
     }
 
     var engine = "—"
+    var engineProcess = "—"
+    var engineTag = ""
+    var engineRunning = false
+    var api = "—"
+    var apiAlive = false
     var proxy = "—"
+    var proxyIsOurs = false
     var cert = "—"
+    var certPresent = false
+    var certTrusted = false
     var page = "—"
+    var pageConnected = false
+    var resident = false
+    var startedAt = ""
     var raw = ""
     var pillText = "检查中"
     var pillTone: Tone = .gray
+}
+
+struct PageWaitInfo: Equatable {
+    var elapsed = 0
+    var timeout = 0
+
+    var clock: String {
+        String(format: "%02d:%02d", elapsed / 60, elapsed % 60)
+    }
 }
 
 struct Banner: Identifiable, Equatable {
@@ -60,6 +88,13 @@ final class AppModel: ObservableObject {
         case other
     }
 
+    private struct RunSummary {
+        var ok = 0
+        var failed = 0
+        var skipped = 0
+        var dir = ""
+    }
+
     @Published var linksText = ""
     @Published var accountQuery = ""
     @Published var limit = 20 {
@@ -80,16 +115,24 @@ final class AppModel: ObservableObject {
     @Published var banner: Banner?
     @Published var status = StatusSnapshot()
     @Published var tab = 0
+    @Published var pageWait: PageWaitInfo?
+    @Published var activity = ""
 
     private var process: Process?
-    private var pipe: Pipe?
-    private var buffer = ""
-    private var currentTask: Int?
+    private var stdoutPipe: Pipe?
+    private var stderrPipe: Pipe?
+    private var stdoutBuffer = ""
+    private var stderrBuffer = ""
+    private var stderrTail = ""
     private var cancelled = false
     private var lastError: String?
+    private var lastErrorHint: String?
     private var statusProcess: Process?
     private var pendingKind: RunKind = .other
     private var shutdownCompletion: (() -> Void)?
+    private var summary: RunSummary?
+    private var doctorFails = 0
+    private var restoreFailed = false
 
     init() {
         let defaults = UserDefaults.standard
@@ -167,13 +210,18 @@ final class AppModel: ObservableObject {
         }
         cancelled = true
         shutdownCompletion = completion
+        activity = "正在停止并恢复网络设置…"
+        pageWait = nil
         appendLog("· 正在停止并恢复系统代理 …")
         running.interrupt()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
+        // Restoring the proxy can raise an administrator prompt; killing the
+        // child before the user answers would leave the system proxy pointed at
+        // a closed port, so the fallbacks are deliberately generous.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
             guard let self, let current = self.process, current.isRunning else { return }
             current.terminate()
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 75) { [weak self] in
             guard let self, let finish = self.shutdownCompletion else { return }
             self.shutdownCompletion = nil
             finish()
@@ -224,7 +272,7 @@ final class AppModel: ObservableObject {
     }
 
     func revealLastFile() {
-        if let path = tasks.last(where: { $0.state == .done })?.detail, !path.isEmpty,
+        if let path = tasks.last(where: { $0.state == .done && !$0.path.isEmpty })?.path,
            FileManager.default.fileExists(atPath: path) {
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
             return
@@ -273,7 +321,10 @@ final class AppModel: ObservableObject {
             notify(.error, "先填账号昵称、username，或该账号任意一条视频链接。")
             return
         }
-        var args = ["user", query, "--limit", String(limit), "--pages", "5"]
+        // The feed list holds roughly 20 videos per page; a fixed five pages
+        // could never reach the 200 the stepper allows.
+        let pages = max(1, Int(ceil(Double(limit) / 20.0)))
+        var args = ["user", query, "--limit", String(limit), "--pages", String(pages)]
         args += downloadArgs()
         run(args: args, title: "下载账号最近的 \(limit) 条", kind: .account)
     }
@@ -293,20 +344,26 @@ final class AppModel: ObservableObject {
     }
 
     func cancel() {
-        guard let running = process, isRunning else { return }
+        guard let running = process, isRunning, !cancelled else { return }
         cancelled = true
+        activity = "正在停止并恢复网络设置…"
         appendLog("· 正在停止并恢复网络 …")
         running.interrupt()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
             guard let self, let current = self.process, current.isRunning else { return }
             current.terminate()
         }
     }
 
     private func downloadArgs() -> [String] {
-        var args = ["--yes", "--out", downloadDirPath]
+        // --wait-page=forever is the GUI's one behavioural difference: waiting
+        // for the Channels page is shown as a step, never a silent timeout.
+        var args = ["--yes", "--wait-page=forever", "--out", downloadDirPath]
         if useOriginal { args += ["--spec", "original"] }
         if let zip = engineZipPath { args += ["--zip", zip] }
+        // A download started while resident must not tear the proxy down when
+        // it ends; ending resident mode stays an explicit action.
+        if status.proxyIsOurs { args.append("--keep") }
         return args
     }
 
@@ -329,29 +386,46 @@ final class AppModel: ObservableObject {
             notify(.error, "应用包里的 wxdl 命令行不见了，请重新下载安装包。")
             return
         }
+        var fullArgs = args
+        if !fullArgs.contains("--json") { fullArgs.append("--json") }
+
         tasks = []
         progressDone = 0
         progressTotal = 0
-        currentTask = nil
         lastError = nil
+        lastErrorHint = nil
         cancelled = false
+        summary = nil
+        doctorFails = 0
+        restoreFailed = false
+        pageWait = nil
+        activity = ""
         pendingKind = kind
         runTitle = title
         isRunning = true
         banner = nil
-        appendLog("\n$ wxdl " + args.joined(separator: " "))
+        stdoutBuffer = ""
+        stderrBuffer = ""
+        stderrTail = ""
+        appendLog("\n$ wxdl " + fullArgs.joined(separator: " "))
 
         let child = Process()
         child.executableURL = executable
-        child.arguments = args
+        child.arguments = fullArgs
         child.environment = cliEnvironment()
-        let output = Pipe()
-        child.standardOutput = output
-        child.standardError = output
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        child.standardOutput = outPipe
+        child.standardError = errPipe
+        outPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            DispatchQueue.main.async { self?.consume(text) }
+            DispatchQueue.main.async { self?.consumeStdout(text) }
+        }
+        errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async { self?.consumeStderr(text) }
         }
         child.terminationHandler = { [weak self] finished in
             DispatchQueue.main.async { self?.finished(finished) }
@@ -364,7 +438,8 @@ final class AppModel: ObservableObject {
             return
         }
         process = child
-        pipe = output
+        stdoutPipe = outPipe
+        stderrPipe = errPipe
     }
 
     private func cliEnvironment() -> [String: String] {
@@ -375,32 +450,56 @@ final class AppModel: ObservableObject {
     }
 
     private func finished(_ completed: Process) {
-        pipe?.fileHandleForReading.readabilityHandler = nil
-        pipe = nil
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
+        stdoutPipe = nil
+        stderrPipe = nil
         process = nil
-        if !buffer.isEmpty {
-            let rest = buffer
-            buffer = ""
-            handle(line: rest)
+
+        if !stdoutBuffer.trimmed.isEmpty {
+            let rest = stdoutBuffer
+            stdoutBuffer = ""
+            handleEventLine(rest.trimmed)
         }
+        if !stderrBuffer.trimmed.isEmpty {
+            let rest = stderrBuffer.trimmed
+            stderrBuffer = ""
+            if let last = rest.split(separator: "\n").last {
+                stderrTail = String(last).trimmed
+            }
+            appendLog(rest)
+        }
+
         isRunning = false
+        activity = ""
+        pageWait = nil
 
         if cancelled {
             for index in tasks.indices where tasks[index].state == .running {
                 tasks[index].state = .failed
                 tasks[index].detail = "已取消"
             }
-            notify(.info, "已停止，系统代理已恢复。")
+            if restoreFailed {
+                notify(.error, "已停止，但没能恢复系统代理。请在系统设置里检查，或点「恢复网络」。")
+            } else {
+                notify(.info, "已停止，系统代理已恢复。")
+            }
             cancelled = false
+            restoreFailed = false
         } else if completed.terminationStatus == 0 {
             switch pendingKind {
             case .links, .account:
-                let ok = tasks.filter { $0.state == .done }.count
-                let failed = tasks.filter { $0.state == .failed }.count
+                let ok = summary?.ok ?? tasks.filter { $0.state == .done }.count
+                let failed = summary?.failed ?? tasks.filter { $0.state == .failed }.count
+                let skipped = summary?.skipped ?? tasks.filter { $0.state == .skipped }.count
                 if failed == 0 {
-                    notify(.success, "完成：\(ok) 个视频已保存到 \(downloadDirDisplay)")
+                    var text = "完成：\(ok) 个视频已保存到 \(downloadDirDisplay)"
+                    if skipped > 0 { text = "完成：\(ok) 个已保存，\(skipped) 个之前下过。" }
+                    notify(.success, text)
                 } else {
-                    notify(.info, "完成：\(ok) 成功，\(failed) 失败。失败原因见右侧日志。")
+                    var text = "完成：\(ok) 成功，\(failed) 失败"
+                    if skipped > 0 { text += "，\(skipped) 跳过" }
+                    notify(.info, text + "。失败原因见右侧日志。")
                 }
             case .on:
                 notify(.success, "窗口下载按钮已开启。去微信视频号页面看看；用完点「恢复网络」。")
@@ -414,15 +513,15 @@ final class AppModel: ObservableObject {
         } else if pendingKind == .doctor {
             // doctor exits non-zero when any check fails; those are findings,
             // not a crash, so the banner must not read like an app error.
-            notify(.info, "自检完成：有项目没通过，逐条看右侧日志。")
+            notify(.info, "自检完成：有 \(doctorFails) 项没通过，逐条看右侧日志。")
         } else {
-            var message = lastError ?? "wxdl 退出码 \(completed.terminationStatus)，详情见右侧日志。"
-            if message.contains("视频号页面") {
-                message += "（如果刚设置过代理，请 Cmd+Q 完全退出微信再重新打开。）"
+            var message = lastError ?? (stderrTail.isEmpty ? nil : stderrTail)
+                ?? "wxdl 退出码 \(completed.terminationStatus)，详情见右侧日志。"
+            if let hint = lastErrorHint, !hint.isEmpty {
+                message += "（\(hint)）"
             }
             notify(.error, message)
         }
-        currentTask = nil
         if let finish = shutdownCompletion {
             shutdownCompletion = nil
             finish()
@@ -431,81 +530,196 @@ final class AppModel: ObservableObject {
         refreshStatus()
     }
 
-    // MARK: - Output parsing
+    // MARK: - Event stream
 
-    private func consume(_ chunk: String) {
-        let withoutColors = chunk.replacingOccurrences(
-            of: "\u{001B}\\[[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
-        buffer += withoutColors
-        while let newline = buffer.firstIndex(of: "\n") {
-            var line = String(buffer[..<newline])
-            buffer = String(buffer[buffer.index(after: newline)...])
-            if let last = line.split(separator: "\r", omittingEmptySubsequences: false).last {
-                line = String(last)
-            }
-            line = line.trimmingCharacters(in: .whitespaces)
-            if line.isEmpty { continue }
-            handle(line: line)
+    private func consumeStdout(_ chunk: String) {
+        stdoutBuffer += chunk
+        while let newline = stdoutBuffer.firstIndex(of: "\n") {
+            let line = String(stdoutBuffer[..<newline]).trimmed
+            stdoutBuffer = String(stdoutBuffer[stdoutBuffer.index(after: newline)...])
+            if !line.isEmpty { handleEventLine(line) }
         }
     }
 
-    private func handle(line: String) {
-        appendLog(line)
-
-        if line.contains("❌") {
-            lastError = line.replacingOccurrences(of: "❌", with: "").trimmed
-            return
-        }
-        if parseItemStart(line) { return }
-
-        if line.contains("已保存：") {
-            let raw = line.components(separatedBy: "已保存：").last?.trimmed ?? ""
-            if let index = currentTask, tasks.indices.contains(index) {
-                tasks[index].state = .done
-                tasks[index].detail = cleanPath(raw)
-                progressDone = Double(tasks[index].index)
+    private func consumeStderr(_ chunk: String) {
+        stderrBuffer += chunk
+        while let newline = stderrBuffer.firstIndex(of: "\n") {
+            let line = String(stderrBuffer[..<newline]).trimmed
+            stderrBuffer = String(stderrBuffer[stderrBuffer.index(after: newline)...])
+            if !line.isEmpty {
+                stderrTail = line
+                appendLog(line)
             }
-            return
-        }
-        if line.contains("跳过：") || line.contains("失败：") {
-            if let index = currentTask, tasks.indices.contains(index), tasks[index].state == .running {
-                tasks[index].state = .failed
-                tasks[index].detail = line
-                progressDone = Double(tasks[index].index)
-            }
-            return
-        }
-        if line.contains("完成："), progressTotal > 0 {
-            progressDone = progressTotal
         }
     }
 
-    private func parseItemStart(_ line: String) -> Bool {
-        guard line.hasPrefix("["), let close = line.firstIndex(of: "]") else { return false }
-        let inside = line[line.index(after: line.startIndex)..<close]
-        let parts = inside.split(separator: "/")
-        guard parts.count == 2, let number = Int(parts[0]), let total = Int(parts[1]),
-              number > 0, total >= number else { return false }
-        let title = String(line[line.index(after: close)...]).trimmed
-        progressTotal = Double(total)
-        progressDone = Double(number - 1)
-        if let index = currentTask, tasks.indices.contains(index), tasks[index].state == .running {
+    private func handleEventLine(_ line: String) {
+        guard let data = line.data(using: .utf8),
+              let raw = try? JSONSerialization.jsonObject(with: data),
+              let obj = raw as? [String: Any],
+              let type = obj["t"] as? String else {
+            appendLog("· 非事件输出：\(line)")
+            return
+        }
+        handle(event: type, obj)
+    }
+
+    private func handle(event: String, _ obj: [String: Any]) {
+        switch event {
+        case "run.start":
+            let total = intValue(obj, "total")
+            if total > 0 { progressTotal = Double(total) }
+            activity = "正在准备运行环境…"
+            appendLog("· 开始：\(stringValue(obj, "cmd"))，\(total > 0 ? "\(total) 条" : "待确认数量")")
+        case "run.plan":
+            progressTotal = Double(intValue(obj, "total"))
+            appendLog("· 计划下载 \(Int(progressTotal)) 条")
+        case "env.check":
+            appendLog("· 环境检查 \(stringValue(obj, "name"))：\(stringValue(obj, "detail"))")
+        case "engine.install":
+            let phase = stringValue(obj, "phase")
+            switch phase {
+            case "done":
+                activity = ""
+                appendLog("· 抓取引擎已就绪 \(stringValue(obj, "tag"))")
+            case "failed":
+                activity = ""
+            default:
+                activity = "正在准备抓取引擎…"
+            }
+        case "auth.request":
+            activity = "等待管理员授权…"
+            pageWait = nil
+            appendLog("· 需要管理员授权：\(stringValue(obj, "reason"))")
+        case "auth.done":
+            activity = ""
+            appendLog("· 管理员授权\(boolValue(obj, "granted") ? "已完成" : "被取消")")
+        case "wait.page":
+            if boolValue(obj, "connected") {
+                pageWait = nil
+                activity = ""
+            } else {
+                pageWait = PageWaitInfo(elapsed: intValue(obj, "elapsed"), timeout: intValue(obj, "timeout"))
+                activity = "等待微信视频号页面…"
+            }
+        case "item.start":
+            startTask(obj)
+        case "item.progress":
+            guard let index = taskIndex(intValue(obj, "index")) else { break }
+            tasks[index].pct = doubleValue(obj, "pct")
+            tasks[index].bytes = int64Value(obj, "bytes")
+            tasks[index].totalBytes = int64Value(obj, "total_bytes")
+            tasks[index].phase = stringValue(obj, "status")
+            if tasks[index].state != .running { tasks[index].state = .running }
+        case "item.done":
+            guard let index = taskIndex(intValue(obj, "index")) else { break }
             tasks[index].state = .done
+            tasks[index].path = stringValue(obj, "path")
+            tasks[index].pct = 100
+            tasks[index].bytes = int64Value(obj, "bytes")
+            if tasks[index].totalBytes == 0 { tasks[index].totalBytes = tasks[index].bytes }
+            let name = (tasks[index].path as NSString).lastPathComponent
+            let duration = stringValue(obj, "duration")
+            tasks[index].detail = duration.isEmpty ? name : "\(name) · \(duration)"
+        case "item.skip":
+            guard let index = taskIndex(intValue(obj, "index")) else { break }
+            tasks[index].state = .skipped
+            tasks[index].path = stringValue(obj, "path")
+            tasks[index].detail = "之前下过了"
+        case "item.fail":
+            guard let index = taskIndex(intValue(obj, "index")) else { break }
+            tasks[index].state = .failed
+            tasks[index].detail = stringValue(obj, "msg")
+            tasks[index].errorCode = stringValue(obj, "code")
+            tasks[index].hint = stringValue(obj, "hint")
+        case "item.retry":
+            guard let index = taskIndex(intValue(obj, "index")) else { break }
+            tasks[index].detail = "正在重试…"
+        case "run.progress":
+            progressDone = Double(intValue(obj, "done"))
+            progressTotal = Double(intValue(obj, "total"))
+        case "run.done":
+            summary = RunSummary(
+                ok: intValue(obj, "ok"),
+                failed: intValue(obj, "failed"),
+                skipped: intValue(obj, "skipped"),
+                dir: stringValue(obj, "dir")
+            )
+            if progressTotal > 0 { progressDone = progressTotal }
+            activity = ""
+            pageWait = nil
+            if let s = summary {
+                appendLog("· 完成：\(s.ok) 成功，\(s.skipped) 跳过，\(s.failed) 失败")
+            }
+        case "log":
+            appendLog(stringValue(obj, "msg"))
+        case "error":
+            let code = stringValue(obj, "code")
+            if code == "restore_failed" { restoreFailed = true }
+            lastError = stringValue(obj, "msg")
+            lastErrorHint = stringValue(obj, "hint")
+            activity = ""
+            pageWait = nil
+            appendLog("❌ \(lastError ?? "")")
+        case "status":
+            applyStatusJSON(obj)
+        case "doctor.done":
+            doctorFails = intValue(obj, "fails")
+            activity = ""
+            appendLog("· 自检完成：\(doctorFails) 项未通过")
+        default:
+            // A newer CLI may add events; an older App must keep working.
+            appendLog("· 未识别事件 \(event)")
         }
-        tasks.append(DownloadTask(index: number, title: title.isEmpty ? "第 \(number) 条" : title, state: .running))
-        currentTask = tasks.count - 1
-        return true
     }
 
-    private func cleanPath(_ raw: String) -> String {
-        var path = raw
-        if let range = path.range(of: " 时长") {
-            path = String(path[..<range.lowerBound])
+    private func startTask(_ obj: [String: Any]) {
+        let index = intValue(obj, "index")
+        let total = intValue(obj, "total")
+        if total > 0 { progressTotal = Double(total) }
+        let title = stringValue(obj, "title")
+        let url = stringValue(obj, "url")
+        let display = title.isEmpty ? (url.isEmpty ? "第 \(index) 条" : url) : title
+        activity = ""
+        pageWait = nil
+        if let existing = taskIndex(index) {
+            tasks[existing].state = .running
+            tasks[existing].title = display
+            tasks[existing].detail = ""
+            tasks[existing].path = ""
+            tasks[existing].pct = 0
+            tasks[existing].bytes = 0
+            tasks[existing].totalBytes = 0
+            tasks[existing].phase = "queued"
+            tasks[existing].errorCode = ""
+            tasks[existing].hint = ""
+        } else {
+            tasks.append(DownloadTask(index: index, title: display, state: .running))
         }
-        if let range = path.range(of: " (", options: .backwards) {
-            path = String(path[..<range.lowerBound])
-        }
-        return path.trimmed
+    }
+
+    private func taskIndex(_ index: Int) -> Int? {
+        tasks.firstIndex { $0.index == index }
+    }
+
+    private func intValue(_ obj: [String: Any], _ key: String) -> Int {
+        (obj[key] as? NSNumber)?.intValue ?? 0
+    }
+
+    private func int64Value(_ obj: [String: Any], _ key: String) -> Int64 {
+        (obj[key] as? NSNumber)?.int64Value ?? 0
+    }
+
+    private func doubleValue(_ obj: [String: Any], _ key: String) -> Double {
+        (obj[key] as? NSNumber)?.doubleValue ?? 0
+    }
+
+    private func boolValue(_ obj: [String: Any], _ key: String) -> Bool {
+        (obj[key] as? NSNumber)?.boolValue ?? false
+    }
+
+    private func stringValue(_ obj: [String: Any], _ key: String) -> String {
+        obj[key] as? String ?? ""
     }
 
     private func appendLog(_ line: String) {
@@ -521,17 +735,17 @@ final class AppModel: ObservableObject {
         guard statusProcess == nil, let executable = cliURL else { return }
         let child = Process()
         child.executableURL = executable
-        child.arguments = ["status", "--yes"]
+        child.arguments = ["status", "--json"]
         child.environment = cliEnvironment()
         let output = Pipe()
         child.standardOutput = output
-        child.standardError = output
+        child.standardError = Pipe()
         child.terminationHandler = { [weak self] completed in
             let data = output.fileHandleForReading.readDataToEndOfFile()
             let text = String(data: data, encoding: .utf8) ?? ""
             DispatchQueue.main.async {
                 self?.statusProcess = nil
-                if completed.terminationStatus == 0 { self?.applyStatus(text) }
+                if completed.terminationStatus == 0 { self?.applyStatusLines(text) }
             }
         }
         do {
@@ -542,33 +756,47 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func applyStatus(_ text: String) {
-        var snapshot = StatusSnapshot()
-        snapshot.raw = text
-        for raw in text.split(separator: "\n") {
-            let line = String(raw)
-            func value(of key: String) -> String? {
-                let prefix = key + ":"
-                guard line.hasPrefix(prefix) else { return nil }
-                return String(line.dropFirst(prefix.count)).trimmed
-            }
-            if let v = value(of: "抓取引擎进程") {
-                snapshot.engine = v
-            } else if let v = value(of: "系统代理") {
-                snapshot.proxy = v
-            } else if let v = value(of: "根证书") {
-                snapshot.cert = v
-            } else if let v = value(of: "视频号页面") {
-                snapshot.page = v
-            }
+    private func applyStatusLines(_ text: String) {
+        for line in text.split(separator: "\n") {
+            guard let data = line.data(using: .utf8),
+                  let raw = try? JSONSerialization.jsonObject(with: data),
+                  let obj = raw as? [String: Any],
+                  obj["t"] as? String == "status" else { continue }
+            applyStatusJSON(obj)
+            return
         }
-        if snapshot.proxy.contains("已指向 wxdl") {
+    }
+
+    private func applyStatusJSON(_ obj: [String: Any]) {
+        var snapshot = StatusSnapshot()
+        snapshot.engineProcess = stringValue(obj, "engine_process")
+        snapshot.engineTag = stringValue(obj, "engine_tag")
+        snapshot.engineRunning = boolValue(obj, "engine_running")
+        snapshot.engine = snapshot.engineTag.isEmpty
+            ? snapshot.engineProcess
+            : "\(snapshot.engineProcess) · \(snapshot.engineTag)"
+        snapshot.api = stringValue(obj, "api")
+        snapshot.apiAlive = boolValue(obj, "api_alive")
+        snapshot.proxy = stringValue(obj, "proxy")
+        snapshot.proxyIsOurs = boolValue(obj, "proxy_is_ours")
+        snapshot.cert = stringValue(obj, "cert")
+        snapshot.certPresent = boolValue(obj, "cert_present")
+        snapshot.certTrusted = boolValue(obj, "cert_trusted")
+        snapshot.page = stringValue(obj, "page")
+        snapshot.pageConnected = boolValue(obj, "page_connected")
+        snapshot.resident = boolValue(obj, "resident")
+        snapshot.startedAt = stringValue(obj, "started_at")
+        if let raw = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+           let text = String(data: raw, encoding: .utf8) {
+            snapshot.raw = text
+        }
+        if snapshot.proxyIsOurs {
             snapshot.pillText = "常驻中"
             snapshot.pillTone = .blue
-        } else if snapshot.cert.contains("已受信任") {
+        } else if snapshot.certTrusted {
             snapshot.pillText = "环境就绪"
             snapshot.pillTone = .green
-        } else if snapshot.cert == "—" {
+        } else if !snapshot.certPresent {
             snapshot.pillText = "未初始化"
             snapshot.pillTone = .orange
         } else {

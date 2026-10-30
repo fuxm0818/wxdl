@@ -20,9 +20,10 @@ type Item struct {
 
 // Result is the outcome of one item.
 type Result struct {
-	Item Item
-	Path string
-	Err  error
+	Item    Item
+	Path    string
+	Skipped bool
+	Err     error
 }
 
 // Batch downloads items one after another. The engine runs the actual transfer,
@@ -39,55 +40,105 @@ func (s *Session) Batch(items []Item) []Result {
 		s.Say("视频规格：%s", s.Opt.Spec)
 	}
 	s.Say("共 %d 个视频，开始批量下载（下载目录：%s）", len(items), s.Cfg.DownloadDir)
+	var okCount, failCount, skipCount int
 	for i, it := range items {
 		label := it.Label
 		if label == "" {
 			label = selectorLabel(it.Selector)
 		}
-		s.Say("[%d/%d] %s", i+1, len(items), firstLine(label))
+		title := firstLine(label)
+		s.Say("[%d/%d] %s", i+1, len(items), title)
+		s.emit("item.start", map[string]any{
+			"index": i + 1, "total": len(items), "url": selectorURL(it.Selector), "title": title,
+		})
 		if !s.cli.ChannelsAvailable() {
 			if err := s.reconnect(); err != nil {
 				out = append(out, Result{Item: it, Err: err})
+				failCount++
 				s.Say("  跳过：视频号页面未连接")
+				s.emitItemFail(i+1, err)
+				s.emitRunProgress(i+1, len(items), okCount, failCount, skipCount)
 				continue
 			}
 		}
-		path, err := s.downloadOne(it.Selector)
+		path, skipped, err := s.downloadOne(it.Selector, i+1, len(items))
 		if err != nil {
 			// A dropped page or a stale session usually works on the second try.
 			time.Sleep(2 * time.Second)
-			path, err = s.downloadOne(it.Selector)
+			s.emit("item.retry", map[string]any{"index": i + 1, "attempt": 2})
+			path, skipped, err = s.downloadOne(it.Selector, i+1, len(items))
 		}
 		switch {
 		case err != nil:
 			out = append(out, Result{Item: it, Err: err})
+			failCount++
 			s.Say("  失败：%v", err)
+			s.emitItemFail(i+1, err)
 		case path == "":
-			out = append(out, Result{Item: it, Err: fmt.Errorf("任务完成但没有输出文件路径")})
+			err := coded(CodeDownloadFailed, "任务完成但没有输出文件路径", "重试这条")
+			out = append(out, Result{Item: it, Err: err})
+			failCount++
 			s.Say("  失败：没有输出文件路径")
+			s.emitItemFail(i+1, err)
+		case skipped:
+			out = append(out, Result{Item: it, Path: path, Skipped: true})
+			skipCount++
+			s.emit("item.skip", map[string]any{
+				"index": i + 1, "reason": "already_downloaded", "path": path,
+			})
+			s.reportFile(path)
 		default:
 			out = append(out, Result{Item: it, Path: path})
-			s.reportFile(path)
+			okCount++
+			info := s.reportFile(path)
+			s.emit("item.done", map[string]any{
+				"index": i + 1, "path": path, "bytes": info.Size,
+				"duration": info.Duration, "spec": specFromPath(path),
+			})
 		}
+		s.emitRunProgress(i+1, len(items), okCount, failCount, skipCount)
 		time.Sleep(time.Second)
 	}
 	s.summarize(out)
 	return out
 }
 
+func (s *Session) emitItemFail(index int, err error) {
+	s.emit("item.fail", map[string]any{
+		"index": index, "code": ErrorCode(err), "msg": ErrorMessage(err), "hint": ErrorHint(err),
+	})
+}
+
+func (s *Session) emitRunProgress(done, total, ok, failed, skipped int) {
+	s.emit("run.progress", map[string]any{
+		"done": done, "total": total, "ok": ok, "failed": failed, "skipped": skipped,
+	})
+}
+
+func selectorURL(selector map[string]any) string {
+	u, _ := selector["url"].(string)
+	return u
+}
+
 func (s *Session) summarize(results []Result) {
-	var ok, failed int
+	var ok, failed, skipped int
 	var lastFile string
 	for _, r := range results {
 		if r.Err != nil {
 			failed++
 			continue
 		}
-		ok++
+		if r.Skipped {
+			skipped++
+		} else {
+			ok++
+		}
 		lastFile = r.Path
 	}
-	fmt.Print("\r\033[K")
-	s.Say("完成：%d 成功，%d 失败。", ok, failed)
+	s.Raw("\r\033[K")
+	// A reused file is still a success for the person watching the terminal, so
+	// the human line keeps counting it as one; the event stream separates it.
+	s.Say("完成：%d 成功，%d 失败。", ok+skipped, failed)
 	if failed > 0 {
 		for _, r := range results {
 			if r.Err != nil {
@@ -95,48 +146,58 @@ func (s *Session) summarize(results []Result) {
 			}
 		}
 	}
-	if ok > 0 {
+	if ok+skipped > 0 {
 		if !s.Opt.NoDialog && lastFile != "" {
 			_ = run("open", "-R", lastFile)
 		}
 		s.Say("文件都在这里：%s", s.Cfg.DownloadDir)
 	}
+	s.emit("run.done", map[string]any{
+		"ok": ok, "failed": failed, "skipped": skipped,
+		"dir": s.Cfg.DownloadDir, "last_file": lastFile,
+	})
+}
+
+// fileInfo is the weight and length report for one finished download.
+type fileInfo struct {
+	Size     int64
+	Duration string
 }
 
 // reportFile prints what one finished download weighs and how long it is.
-func (s *Session) reportFile(path string) {
+func (s *Session) reportFile(path string) fileInfo {
 	st, err := os.Stat(path)
 	if err != nil {
 		s.Say("  已保存：%s", path)
-		return
+		return fileInfo{}
 	}
+	info := fileInfo{Size: st.Size(), Duration: ffprobeDuration(path)}
 	line := fmt.Sprintf("  已保存：%s (%.1f MB)", path, float64(st.Size())/1024/1024)
-	if d := ffprobeDuration(path); d != "" {
-		line += " 时长 " + d
+	if info.Duration != "" {
+		line += " 时长 " + info.Duration
 	}
 	s.Say("%s", line)
+	return info
 }
 
 // reconnect waits for the Channels page to come back without a long interview.
 func (s *Session) reconnect() error {
-	deadline := time.Now().Add(45 * time.Second)
-	for time.Now().Before(deadline) {
-		if s.cli.ChannelsAvailable() {
+	if s.pollPage(45 * time.Second) {
+		return nil
+	}
+	if s.Opt.WaitPageForever {
+		if s.pollPage(0) {
 			return nil
 		}
-		time.Sleep(time.Second)
+		return coded(CodePageNotConnected, "视频号页面未连接", pageHint)
 	}
 	if !s.Opt.NoDialog {
 		notify("需要视频号页面", "请在微信里重新打开视频号页面，wxdl 会继续等待。")
 	}
-	deadline = time.Now().Add(3 * time.Minute)
-	for time.Now().Before(deadline) {
-		if s.cli.ChannelsAvailable() {
-			return nil
-		}
-		time.Sleep(time.Second)
+	if s.pollPage(3 * time.Minute) {
+		return nil
 	}
-	return fmt.Errorf("视频号页面未连接")
+	return coded(CodePageNotConnected, "视频号页面未连接", pageHint)
 }
 
 // callToolJSON invokes an MCP tool and decodes its JSON payload.
@@ -246,11 +307,24 @@ func (s *Session) finish() {
 	}
 }
 
+// runStart announces the run before the slow prepare phase, so a GUI can show
+// what was asked for while the machine is being set up.
+func (s *Session) runStart(total int) {
+	cmd := s.Opt.Command
+	if cmd == "" {
+		cmd = "get"
+	}
+	s.emit("run.start", map[string]any{
+		"id": runID(), "cmd": cmd, "total": total, "out": s.Cfg.DownloadDir, "spec": s.Opt.Spec,
+	})
+}
+
 // Run prepares the machine, downloads everything and puts the machine back.
 func (s *Session) Run(items []Item) error {
 	if len(items) == 0 {
 		return fmt.Errorf("没有需要下载的内容")
 	}
+	s.runStart(len(items))
 	if err := s.Prepare(); err != nil {
 		s.Abort()
 		return err
@@ -275,6 +349,7 @@ func (s *Session) RunLinks(links []string) error { return s.Run(ItemsFromLinks(l
 // RunAccount downloads an account's recent videos: limit items over at most
 // maxPages list pages.
 func (s *Session) RunAccount(input string, limit, maxPages int) error {
+	s.runStart(0)
 	if err := s.Prepare(); err != nil {
 		s.Abort()
 		return err
@@ -290,6 +365,8 @@ func (s *Session) RunAccount(input string, limit, maxPages int) error {
 		s.finish()
 		return err
 	}
+	// The feed list is the first point where the real count is known.
+	s.emit("run.plan", map[string]any{"total": len(items)})
 	if !s.Opt.NoDialog {
 		ok, cancelled := dialog.Confirm("确认批量下载",
 			fmt.Sprintf("准备下载该账号最近 %d 个视频，是否继续？", len(items)),

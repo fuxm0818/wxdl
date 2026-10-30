@@ -26,7 +26,9 @@ func (s *Session) lockInstance() (func(), error) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, fmt.Errorf("另一个 wxdl 正在下载，请等它结束（锁文件 %s）", path)
+			return nil, coded(CodeLockHeld,
+				fmt.Sprintf("另一个 wxdl 正在下载，请等它结束（锁文件 %s）", path),
+				"等它结束，或在那个窗口点停止")
 		}
 		return nil, err
 	}

@@ -127,3 +127,39 @@ func TestSpecFlagAfterPositional(t *testing.T) {
 		t.Fatal("Options.Spec not wired")
 	}
 }
+
+func TestJSONAndWaitPageFlags(t *testing.T) {
+	fs, c, _ := testSet()
+	if err := parseFlags(fs, []string{"https://weixin.qq.com/sph/abc", "--json", "--wait-page", "forever"}); err != nil {
+		t.Fatal(err)
+	}
+	if !c.jsonOut {
+		t.Error("--json not parsed")
+	}
+	if c.waitPage != "forever" {
+		t.Fatalf("wait-page = %q", c.waitPage)
+	}
+	opts := c.options()
+	if !opts.JSON || !opts.WaitPageForever {
+		t.Fatalf("options not wired: %+v", opts)
+	}
+	if got := fsArgs(fs); len(got) != 1 {
+		t.Fatalf("args = %q", got)
+	}
+}
+
+func TestWaitPageRejectsUnknownValue(t *testing.T) {
+	fs, _, _ := testSet()
+	if err := parseFlags(fs, []string{"--wait-page", "sometimes"}); err == nil {
+		t.Fatal("expected an error for an unknown --wait-page value")
+	}
+}
+
+func TestJSONRequestedIsSyntactic(t *testing.T) {
+	if !jsonRequested([]string{"--json"}) || !jsonRequested([]string{"--json=true"}) {
+		t.Fatal("--json not detected")
+	}
+	if jsonRequested([]string{"--json=false"}) || jsonRequested([]string{"--yes"}) {
+		t.Fatal("false positives")
+	}
+}

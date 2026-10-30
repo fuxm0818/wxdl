@@ -17,6 +17,7 @@ import (
 
 	"github.com/fuxm0818/wxdl/internal/dialog"
 	"github.com/fuxm0818/wxdl/internal/elevate"
+	"github.com/fuxm0818/wxdl/internal/events"
 	"github.com/fuxm0818/wxdl/internal/flow"
 	"github.com/fuxm0818/wxdl/internal/upstream"
 )
@@ -42,9 +43,26 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			return // the flag set already printed its usage
 		}
+		if jsonRequested(raw) {
+			events.New(os.Stdout, true).Error(flow.ErrorCode(err), flow.ErrorMessage(err), flow.ErrorHint(err))
+		}
 		fmt.Fprintf(os.Stderr, "\n❌ %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// jsonRequested is deliberately syntactic: an error during flag parsing must
+// still be reported on the JSON channel when the caller asked for it.
+func jsonRequested(args []string) bool {
+	for _, a := range args {
+		if a == "--json" {
+			return true
+		}
+		if v, ok := strings.CutPrefix(a, "--json="); ok && v != "false" && v != "0" {
+			return true
+		}
+	}
+	return false
 }
 
 // dispatch treats the first non-flag, non-URL word as the subcommand; anything
@@ -112,6 +130,26 @@ type commonFlags struct {
 	filename string
 	timeout  time.Duration
 	spec     string
+	jsonOut  bool
+	waitPage waitPageMode
+}
+
+// waitPageMode validates --wait-page while the flag is parsed, so a typo cannot
+// silently fall back to the default timeouts.
+type waitPageMode string
+
+func (m *waitPageMode) String() string { return string(*m) }
+
+func (m *waitPageMode) Set(v string) error {
+	switch v {
+	case "", "auto":
+		*m = ""
+	case "forever":
+		*m = "forever"
+	default:
+		return fmt.Errorf("--wait-page 只支持 forever（留空表示按阶段超时）")
+	}
+	return nil
 }
 
 func bindCommon(fs *flag.FlagSet) *commonFlags {
@@ -124,6 +162,8 @@ func bindCommon(fs *flag.FlagSet) *commonFlags {
 	fs.StringVar(&c.filename, "filename", "", "自定义文件名（仅单个视频时有意义）")
 	fs.DurationVar(&c.timeout, "timeout", 20*time.Minute, "单个视频的最长等待时间")
 	fs.StringVar(&c.spec, "spec", "", "视频规格：original 取原始视频，留空用引擎默认")
+	fs.BoolVar(&c.jsonOut, "json", false, "输出 NDJSON 事件流（供 GUI 使用）")
+	fs.Var(&c.waitPage, "wait-page", "页面未连接时：forever 一直等；留空按阶段超时")
 	return c
 }
 
@@ -132,13 +172,15 @@ func (c *commonFlags) options() flow.Options {
 		dialog.Disable()
 	}
 	return flow.Options{
-		DownloadDir: c.out,
-		Filename:    c.filename,
-		Keep:        c.keep,
-		NoDialog:    c.yes,
-		UpstreamZip: c.zip,
-		TaskTimeout: c.timeout,
-		Spec:        c.spec,
+		DownloadDir:     c.out,
+		Filename:        c.filename,
+		Keep:            c.keep,
+		NoDialog:        c.yes,
+		UpstreamZip:     c.zip,
+		TaskTimeout:     c.timeout,
+		Spec:            c.spec,
+		JSON:            c.jsonOut,
+		WaitPageForever: c.waitPage == "forever",
 	}
 }
 
@@ -204,7 +246,9 @@ func cmdGet(args []string) error {
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	s, err := flow.New(shared.options())
+	opts := shared.options()
+	opts.Command = "get"
+	s, err := flow.New(opts)
 	if err != nil {
 		return err
 	}
@@ -219,7 +263,7 @@ func cmdGet(args []string) error {
 		// overwrite itself instead of producing one file per video.
 		return fmt.Errorf("--filename 只适用于单个链接（当前 %d 条），请去掉 --filename 或一次传一条", len(links))
 	}
-	fmt.Printf("待下载 %d 个视频。\n", len(links))
+	s.Say("待下载 %d 个视频。", len(links))
 	return finishError(s.RunLinks(links))
 }
 
@@ -237,7 +281,9 @@ func cmdUser(args []string) error {
 	if shared.filename != "" {
 		return errors.New("user 是批量下载，不支持 --filename；单个文件请用 wxdl get <链接> --filename 名称")
 	}
-	s, err := flow.New(shared.options())
+	opts := shared.options()
+	opts.Command = "user"
+	s, err := flow.New(opts)
 	if err != nil {
 		return err
 	}
@@ -255,11 +301,17 @@ func cmdDoctor(args []string) error {
 	if err != nil {
 		return err
 	}
+	if shared.jsonOut {
+		if fails := s.EmitDoctor(); fails > 0 {
+			return &flow.Coded{Code: flow.CodeDoctorFailed, Msg: fmt.Sprintf("%d 项检查未通过", fails)}
+		}
+		return nil
+	}
 	fmt.Println("wxdl 环境自检")
 	fmt.Println(strings.Repeat("-", 40))
 	fails := s.PrintDoctor()
 	if fails > 0 {
-		return fmt.Errorf("%d 项检查未通过", fails)
+		return &flow.Coded{Code: flow.CodeDoctorFailed, Msg: fmt.Sprintf("%d 项检查未通过", fails)}
 	}
 	fmt.Println("\n可以运行：wxdl get <视频号链接>")
 	return nil
@@ -274,6 +326,10 @@ func cmdStatus(args []string) error {
 	s, err := flow.New(shared.options())
 	if err != nil {
 		return err
+	}
+	if shared.jsonOut {
+		s.EmitStatus()
+		return nil
 	}
 	fmt.Println(s.Status())
 	return nil
@@ -294,7 +350,7 @@ func cmdUndo(args []string) error {
 		return err
 	}
 	if !*removeCert {
-		fmt.Println("提示：根证书保留着，下次批量下载不必再输密码。要一并删除请用 wxdl undo --cert")
+		s.Say("提示：根证书保留着，下次批量下载不必再输密码。要一并删除请用 wxdl undo --cert")
 	}
 	return nil
 }
@@ -389,7 +445,8 @@ func installInterruptHandler(s *flow.Session) {
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		for range ch {
-			fmt.Println("\n收到中断，正在恢复系统代理设置 ...")
+			s.Raw("\n")
+			s.Say("收到中断，正在恢复系统代理设置 ...")
 			// Stop catching further signals: a second Ctrl-C while the elevation
 			// panel is open must not start a parallel rollback.
 			signal.Stop(ch)
@@ -425,6 +482,8 @@ func usage() {
   --limit N        user 命令的下载数量上限（默认 20）
   --yes            不弹窗，用于脚本/CI
   --zip FILE       使用本地抓取引擎安装包，不联网
+  --json           输出 NDJSON 事件流，供图形界面读取（不隐含 --yes）
+  --wait-page MODE 页面未连接时：forever 一直等；留空按阶段超时
 
 说明：wxdl 只是把上游开源项目 ltaoo/wx_channels_download 的 MITM 能力包装成命令行，
 仅供学习研究使用；它不会出售该软件。详见 LICENSE 与 NOTICE-upstream.md。

@@ -106,7 +106,7 @@ func PromptLink() string {
 
 // ReadLinesFromStdin reads pasted multi-line input when there is no GUI.
 func ReadLinesFromStdin(prompt string) string {
-	fmt.Println(prompt + "（每行一个链接，回车两次结束）")
+	fmt.Fprintln(os.Stderr, prompt+"（每行一个链接，回车两次结束）")
 	reader := bufio.NewReader(os.Stdin)
 	var b strings.Builder
 	for {

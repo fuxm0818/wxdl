@@ -132,6 +132,21 @@ func (s *Session) Doctor() []Check {
 	return out
 }
 
+// EmitDoctor writes the checks as env.check events plus a final doctor.done.
+// It returns the number of failures, like PrintDoctor.
+func (s *Session) EmitDoctor() int {
+	checks := s.Doctor()
+	fails := 0
+	for _, c := range checks {
+		s.check(c.Name, c.Status, c.Detail, c.Hint)
+		if c.Status == "fail" {
+			fails++
+		}
+	}
+	s.emit("doctor.done", map[string]any{"fails": fails})
+	return fails
+}
+
 // PrintDoctor renders the checks and returns the number of failures.
 func (s *Session) PrintDoctor() int {
 	checks := s.Doctor()

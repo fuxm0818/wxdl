@@ -55,7 +55,7 @@ func Run(script, prompt string) error {
 	if _, err := os.Stat("/dev/tty"); err != nil {
 		return asErr
 	}
-	fmt.Println("没有图形会话，改用终端 sudo 授权：")
+	fmt.Fprintln(os.Stderr, "没有图形会话，改用终端 sudo 授权：")
 	cmd := exec.Command("sudo", "-n", "/bin/bash", file)
 	if err := cmd.Run(); err != nil {
 		cmd = exec.Command("sudo", "/bin/bash", file)

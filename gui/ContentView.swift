@@ -35,6 +35,9 @@ struct ContentView: View {
                             if model.hasProgress {
                                 ProgressPane(model: model)
                             }
+                            if model.pageWait != nil {
+                                PageWaitCard(model: model)
+                            }
                             if !model.tasks.isEmpty {
                                 TaskListPane(model: model)
                             }
@@ -221,7 +224,7 @@ struct ServePane: View {
                     Label("恢复网络", systemImage: "bolt.horizontal.circle")
                 }
                 Spacer()
-                if model.status.proxy.contains("已指向 wxdl") {
+                if model.status.proxyIsOurs {
                     Label("常驻中", systemImage: "dot.radiowaves.left.and.right")
                         .font(.caption)
                         .foregroundColor(.blue)
@@ -242,7 +245,7 @@ struct ProgressPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(model.isRunning ? model.runTitle : "上次任务")
+                Text(progressTitle)
                     .font(.subheadline)
                     .fontWeight(.semibold)
                 Spacer()
@@ -252,7 +255,7 @@ struct ProgressPane: View {
                         .monospacedDigit()
                         .foregroundColor(.secondary)
                 }
-                if model.isRunning {
+                if model.isRunning && model.pageWait == nil {
                     Button("停止") { model.cancel() }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
@@ -268,12 +271,67 @@ struct ProgressPane: View {
         }
         .card()
     }
+
+    private var progressTitle: String {
+        guard model.isRunning else { return "上次任务" }
+        let activity = model.activity.trimmed
+        return activity.isEmpty ? model.runTitle : activity
+    }
+}
+
+struct PageWaitCard: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: "iphone.radiowaves.left.and.right")
+                    .foregroundColor(.accentColor)
+                Text("等待微信视频号页面")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                Spacer()
+                if let wait = model.pageWait {
+                    Text("已等待 \(wait.clock)")
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundColor(.secondary)
+                }
+            }
+            Text("微信还在用旧的代理设置，需要重启一次才能真正连上。")
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 7) {
+                StepText(number: "1", text: "回到微信，按 ⌘Q 完全退出（不是关窗口）。")
+                StepText(number: "2", text: "重新打开微信，进入「视频号」。")
+                StepText(number: "3", text: "点开任意一条视频，让页面停在那里。")
+            }
+            HStack {
+                if let wait = model.pageWait, wait.timeout > 0 {
+                    Text("页面连上后会自动继续；本次最多等 \(wait.timeout) 秒。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("完成后会自动继续，不用再点什么。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                if model.isRunning {
+                    Button("停止并恢复网络") { model.cancel() }
+                        .controlSize(.small)
+                }
+            }
+        }
+        .card()
+    }
 }
 
 struct TaskListPane: View {
     @ObservedObject var model: AppModel
 
     private var okCount: Int { model.tasks.filter { $0.state == .done }.count }
+    private var skippedCount: Int { model.tasks.filter { $0.state == .skipped }.count }
     private var failedCount: Int { model.tasks.filter { $0.state == .failed }.count }
 
     var body: some View {
@@ -283,7 +341,7 @@ struct TaskListPane: View {
                     .font(.subheadline)
                     .fontWeight(.semibold)
                 Spacer()
-                Text("\(okCount) 成功 · \(failedCount) 失败")
+                Text("\(okCount) 成功 · \(skippedCount) 跳过 · \(failedCount) 失败")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -304,21 +362,16 @@ struct TaskRow: View {
             Image(systemName: iconName)
                 .foregroundColor(iconColor)
                 .frame(width: 16)
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(task.title)
                     .font(.system(size: 12))
                     .lineLimit(1)
-                if !task.detail.isEmpty {
-                    Text(task.detail)
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                }
+                subtitle
             }
             Spacer()
-            if task.state == .done, FileManager.default.fileExists(atPath: task.detail) {
+            if showsRevealButton {
                 Button {
-                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: task.detail)])
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: task.path)])
                 } label: {
                     Image(systemName: "folder")
                 }
@@ -328,10 +381,72 @@ struct TaskRow: View {
         }
     }
 
+    @ViewBuilder
+    private var subtitle: some View {
+        switch task.state {
+        case .running:
+            if task.totalBytes > 0 {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(Self.bytes(task.bytes)) / \(Self.bytes(task.totalBytes)) · \(Int(task.pct))%")
+                        .font(.system(size: 10))
+                        .monospacedDigit()
+                        .foregroundColor(.secondary)
+                    ProgressView(value: min(max(task.pct / 100, 0), 1))
+                        .progressViewStyle(.linear)
+                        .frame(width: 190)
+                }
+            } else {
+                Text(task.detail.isEmpty ? phaseText : task.detail)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+        case .failed:
+            VStack(alignment: .leading, spacing: 1) {
+                if !task.detail.isEmpty {
+                    Text(task.detail)
+                        .font(.system(size: 10))
+                        .foregroundColor(.red)
+                        .lineLimit(2)
+                }
+                if !task.hint.isEmpty {
+                    Text(task.hint)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        case .done, .skipped:
+            if !task.detail.isEmpty {
+                Text(task.detail)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    private var showsRevealButton: Bool {
+        (task.state == .done || task.state == .skipped) && !task.path.isEmpty
+            && FileManager.default.fileExists(atPath: task.path)
+    }
+
+    private var phaseText: String {
+        switch task.phase {
+        case "queued": return "排队中"
+        case "preparing": return "准备中"
+        case "downloading": return "下载中"
+        case "paused": return "已暂停"
+        case "merging": return "合并中"
+        case "working": return "处理中"
+        default: return "处理中"
+        }
+    }
+
     private var iconName: String {
         switch task.state {
         case .running: return "arrow.down.circle"
         case .done: return "checkmark.circle.fill"
+        case .skipped: return "arrow.uturn.right.circle.fill"
         case .failed: return "xmark.octagon.fill"
         }
     }
@@ -340,8 +455,13 @@ struct TaskRow: View {
         switch task.state {
         case .running: return .accentColor
         case .done: return .green
+        case .skipped: return .gray
         case .failed: return .red
         }
+    }
+
+    private static func bytes(_ value: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: value, countStyle: .file)
     }
 }
 

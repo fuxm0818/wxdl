@@ -107,7 +107,7 @@ func text(out string) string { return field(out, "text returned:") }
 // Info shows a message the user only has to acknowledge. The terminal copy is
 // always printed because a dialog can be missed on a busy desktop.
 func Info(title, msg string) {
-	fmt.Printf("ℹ️  %s: %s\n", title, msg)
+	fmt.Fprintf(os.Stderr, "ℹ️  %s: %s\n", title, msg)
 	if disabled {
 		return
 	}
@@ -116,7 +116,7 @@ func Info(title, msg string) {
 
 // Error shows a blocking failure message.
 func Error(title, msg string) {
-	fmt.Printf("❌ %s: %s\n", title, msg)
+	fmt.Fprintf(os.Stderr, "❌ %s: %s\n", title, msg)
 	if disabled {
 		return
 	}
@@ -150,7 +150,7 @@ func Confirm(title, msg, yesLabel, noLabel string) (yes bool, cancelled bool) {
 }
 
 func confirmStdin(title, msg string) (yes bool, cancelled bool) {
-	fmt.Printf("%s\n%s\n输入 y 确认，其他任意键取消：", title, msg)
+	fmt.Fprintf(os.Stderr, "%s\n%s\n输入 y 确认，其他任意键取消：", title, msg)
 	line := readLine()
 	if line == "" {
 		// Nothing to read means "not confirmed", never "the user cancelled".
@@ -179,7 +179,7 @@ func Ask(title, msg, def string) (string, bool) {
 }
 
 func askStdin(title, msg, def string) (string, bool) {
-	fmt.Printf("%s\n%s [%s]: ", title, msg, def)
+	fmt.Fprintf(os.Stderr, "%s\n%s [%s]: ", title, msg, def)
 	line := readLine()
 	if line == "" {
 		line = def
@@ -212,11 +212,11 @@ func Choice(title, msg string, options []string) (string, bool) {
 }
 
 func choiceStdin(title, msg string, options []string) (string, bool) {
-	fmt.Printf("%s\n%s\n", title, msg)
+	fmt.Fprintf(os.Stderr, "%s\n%s\n", title, msg)
 	for i, o := range options {
-		fmt.Printf("  %d) %s\n", i+1, o)
+		fmt.Fprintf(os.Stderr, "  %d) %s\n", i+1, o)
 	}
-	fmt.Print("输入序号：")
+	fmt.Fprint(os.Stderr, "输入序号：")
 	n, err := strconv.Atoi(readLine())
 	if err != nil || n < 1 || n > len(options) {
 		return "", true

@@ -1,9 +1,15 @@
 package flow
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/fuxm0818/wxdl/internal/cfg"
+	"github.com/fuxm0818/wxdl/internal/events"
 	"github.com/fuxm0818/wxdl/internal/server"
 )
 
@@ -136,5 +142,142 @@ func TestWithSpecDoesNotMutateInput(t *testing.T) {
 	}
 	if _, leaked := in[0].Selector["video_variant_spec"]; leaked {
 		t.Fatal("withSpec mutated the caller's selector")
+	}
+}
+
+func TestErrorCodesSurviveWrapping(t *testing.T) {
+	err := fmt.Errorf("outer: %w",
+		codedWrap(CodeEngineInstallFailed, "抓取引擎没能装好", "重试", errors.New("io")))
+	if got := ErrorCode(err); got != CodeEngineInstallFailed {
+		t.Fatalf("code = %q", got)
+	}
+	if got := ErrorMessage(err); got != "抓取引擎没能装好" {
+		t.Fatalf("msg = %q", got)
+	}
+	if got := ErrorHint(err); got != "重试" {
+		t.Fatalf("hint = %q", got)
+	}
+	if got := ErrorCode(errors.New("plain")); got != CodeInternal {
+		t.Fatalf("uncoded error = %q", got)
+	}
+	if got := ErrorHint(errors.New("plain")); got != "" {
+		t.Fatalf("uncoded hint = %q", got)
+	}
+}
+
+func TestProgressKeyTracksBytesAndPhase(t *testing.T) {
+	d := &server.TaskDetail{Status: server.TaskDownloading, Files: []server.File{{Downloaded: 50, Size: 100}}}
+	first := progressKey(d)
+	if first == "" {
+		t.Fatal("known size must produce a key")
+	}
+	d.Files[0].Downloaded = 60
+	if progressKey(d) == first {
+		t.Fatal("byte change must produce a new key")
+	}
+	d.Files[0].Downloaded = 50
+	d.Status = server.TaskMerging
+	if progressKey(d) == first {
+		t.Fatal("phase change must produce a new key")
+	}
+	if progressKey(&server.TaskDetail{}) != "" {
+		t.Fatal("unknown size must not emit")
+	}
+}
+
+func TestEmitItemProgressUsesByteTotals(t *testing.T) {
+	var buf bytes.Buffer
+	s := &Session{em: events.New(&buf, true)}
+	s.emitItemProgress(2, 5, &server.TaskDetail{
+		Status: server.TaskDownloading,
+		Files:  []server.File{{Downloaded: 25, Size: 100}},
+	})
+	var ev map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &ev); err != nil {
+		t.Fatalf("not JSON: %v (%s)", err, buf.String())
+	}
+	if ev["t"] != "item.progress" || ev["index"] != float64(2) || ev["total"] != float64(5) {
+		t.Fatalf("event = %+v", ev)
+	}
+	if ev["pct"] != float64(25) || ev["bytes"] != float64(25) || ev["total_bytes"] != float64(100) {
+		t.Fatalf("progress = %+v", ev)
+	}
+	if ev["status"] != "downloading" {
+		t.Fatalf("status = %v", ev["status"])
+	}
+}
+
+func TestTaskStatusNamesAreStable(t *testing.T) {
+	cases := map[int]string{
+		server.TaskWaiting: "queued", server.TaskPreparing: "preparing",
+		server.TaskDownloading: "downloading", server.TaskPaused: "paused",
+		server.TaskMerging: "merging", 99: "working",
+	}
+	for code, want := range cases {
+		if got := taskStatusName(code); got != want {
+			t.Fatalf("status %d = %q, want %q", code, got, want)
+		}
+	}
+}
+
+func TestSpecFromPath(t *testing.T) {
+	if got := specFromPath("/x/老王的派对_xWT111.mp4"); got != "xWT111" {
+		t.Fatalf("spec = %q", got)
+	}
+	if got := specFromPath("/x/movie.mp4"); got != "" {
+		t.Fatalf("spec without suffix = %q", got)
+	}
+	if got := specFromPath("/x/movie_"); got != "" {
+		t.Fatalf("trailing underscore = %q", got)
+	}
+}
+
+func TestSummarizeEmitsRunDoneWithSkipSeparate(t *testing.T) {
+	var buf bytes.Buffer
+	s := &Session{
+		Cfg: &cfg.Config{DownloadDir: "/tmp/wxdl"},
+		Opt: Options{NoDialog: true},
+		em:  events.New(&buf, true),
+	}
+	s.summarize([]Result{
+		{Item: Item{Selector: map[string]any{"url": "u1"}}, Path: "/tmp/a.mp4"},
+		{Item: Item{Selector: map[string]any{"url": "u2"}}, Path: "/tmp/b.mp4", Skipped: true},
+		{Item: Item{Selector: map[string]any{"url": "u3"}}, Err: coded(CodePageNotConnected, "未连接", "重开微信")},
+	})
+	var done map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var ev map[string]any
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("not JSON: %v (%s)", err, line)
+		}
+		if ev["t"] == "run.done" {
+			done = ev
+		}
+	}
+	if done == nil {
+		t.Fatalf("no run.done event in %s", buf.String())
+	}
+	if done["ok"] != float64(1) || done["skipped"] != float64(1) || done["failed"] != float64(1) {
+		t.Fatalf("run.done = %+v", done)
+	}
+	if done["last_file"] != "/tmp/b.mp4" {
+		t.Fatalf("last_file = %v", done["last_file"])
+	}
+}
+
+func TestCertAndPageLabels(t *testing.T) {
+	s := &Session{Cfg: &cfg.Config{CAName: "wxdl-local-ca"}}
+	if got := certTextFrom(s, false); got != "尚未生成" {
+		t.Fatalf("cert = %q", got)
+	}
+	s.Cfg.CertFile = "/tmp/ca.pem"
+	if got := certTextFrom(s, true); got != "wxdl-local-ca（已受信任）" {
+		t.Fatalf("trusted cert = %q", got)
+	}
+	if got := pageTextFrom(true); got != "已连接" {
+		t.Fatalf("page = %q", got)
+	}
+	if got := pageTextFrom(false); !strings.Contains(got, "未连接") {
+		t.Fatalf("disconnected page = %q", got)
 	}
 }
