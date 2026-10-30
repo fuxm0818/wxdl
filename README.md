@@ -1,5 +1,10 @@
 # wxdl
 
+[![CI](https://github.com/fuxm0818/wxdl/actions/workflows/ci.yml/badge.svg)](https://github.com/fuxm0818/wxdl/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/fuxm0818/wxdl?display_name=tag)](https://github.com/fuxm0818/wxdl/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%2012%2B-lightgrey)](#支持范围)
+[![License](https://img.shields.io/badge/license-MIT%20%2B%20Commons%20Clause-blue)](LICENSE)
+
 微信视频号短视频**批量**下载（macOS），两种用法：
 
 - **桌面 App（推荐）**：下载 DMG，把 `wxdl.app` 拖进「应用程序」，双击打开——
@@ -50,6 +55,7 @@ wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOK
 - [运行时会发生什么](#运行时会发生什么)
 - [常见问题](#常见问题)
 - [工作原理](#工作原理)
+- [技术栈与架构](#技术栈与架构)
 - [和上游、res-downloader 是什么关系](#和上游res-downloader-是什么关系)
 - [隐私与数据安全](#隐私与数据安全)
 - [开发与发布](#开发与发布)
@@ -101,6 +107,12 @@ wxdl get "https://weixin.qq.com/sph/A2oqg1iKx9" "https://weixin.qq.com/sph/ADjOK
   那一步绕不过去）。
 - 如果你的 Clash / Surge 等代理软件在跑，**请先完全退出它们**（会抢系统代理）。
   桌面 App 与 `--yes` 模式不会替你退出，只会明确报错，避免误关你的软件。
+
+**输入**：视频号分享链接（`https://weixin.qq.com/sph/…`、`https://channels.weixin.qq.com/…`）、
+混在整段文字里的链接、`txt` 文件、标准输入、剪贴板；账号昵称 / username / 该账号任意一条视频链接。
+
+**输出**：`mp4`，默认落到 `~/Downloads/wxdl/<视频标题>_<规格>.mp4`；已完成的任务直接复用文件
+（App 里显示「跳过」）；加 `--json` 时 stdout 额外输出 NDJSON 事件流，供脚本和 App 消费。
 
 ## 安装
 
@@ -209,6 +221,11 @@ go build -trimpath \
 - **管理员密码**：只在点「开始下载 / 开启下载按钮」时通过系统授权弹窗要一次；
   App 不会在后台偷偷提权。
 - **停止**：下载中可点「停止」，会中断任务并恢复系统代理。
+- **逐条字节进度**：任务列表里正在下的一条会显示 `12.1 MB / 28.8 MB · 42%` 和细进度条；
+  以前下过的显示灰色「之前下过了」，计为跳过，不算失败。
+- **等微信页面不再超时**：App 用 `--wait-page=forever`，卡住时会显示「等待微信视频号页面」
+  卡片和已等待时间；按里面的 1-2-3 重启微信并打开视频号后会自动继续，只有点
+  「停止并恢复网络」才会结束。
 - **关窗口 = 退出 App**：如果正在下载，App 会先中断任务、等 wxdl 恢复完代理再退出（最多十几秒）。
 - **常驻模式是"留在系统里"的**：「开启下载按钮」跑完会退出，但代理和引擎留在后台——
   这时关掉 App 不会帮你恢复网络，记得回来点「恢复网络」（或在终端 `wxdl off`）。
@@ -395,17 +412,19 @@ wxdl user "账号昵称" --limit 50 --spec original
 
 ## 参数一览
 
-所有下载类命令（`get` / `user` / 裸链接）都接受这些参数，**写在链接前面或后面都可以**：
+所有子命令（`version` / `help` / `install-shortcut` 除外）都接受这些参数，**写在链接前面或后面都可以**：
 
 | 参数 | 默认 | 作用 |
 | --- | --- | --- |
 | `--out DIR` / `-o DIR` | `~/Downloads/wxdl` | 下载目录，不存在会自动创建 |
-| `--keep` | 关 | 下载后保留系统代理和引擎，方便接着下第二批；之后要自己 `wxdl undo` |
+| `--keep` | 关 | 下载后保留系统代理和引擎，方便接着下第二批；之后要自己 `wxdl undo`。中途停止或失败仍会恢复代理，不会留下指向已停止端口的状态 |
 | `--yes` | 关 | 不弹原生窗口，交互走标准输入（脚本用） |
 | `--timeout 10m` | `20m` | 单个视频的最长等待时间 |
 | `--filename NAME` | 用视频标题 | 自定义文件名，**只允许在单条链接时使用**（多条一起传会直接报错，避免互相覆盖） |
 | `--zip FILE` | — | 指定本地 `wx_video_download_*.zip` 引擎安装包，完全离线安装（**不是**把视频打包成 zip） |
 | `--spec NAME` | 引擎首个转码规格 | 视频规格：`original` 下原始视频，或填转码规格名（如 `xWT111`）；对 `get` / `user` 这一批全部生效 |
+| `--json` | 关 | stdout 只输出 NDJSON 事件流（一行一个 JSON），供 GUI / 脚本消费；不加时输出与原来**完全一致** |
+| `--wait-page MODE` | 空（按阶段超时） | `forever`：视频号页面没连上时一直等，直到连上或被 Ctrl-C；桌面 App 用这个值 |
 | `--file PATH` | — | 仅 `get`：从文本文件读链接，`-` 表示标准输入 |
 | `--limit N` | `20` | 仅 `user`：最多下载多少个视频 |
 | `--pages N` | `5` | 仅 `user`：最多翻几页账号列表 |
@@ -431,6 +450,36 @@ wxdl help                          # 用法说明
 
 `wxdl update --follow` 会重新拉上游 Release 并校验官方 `checksums.txt`；
 校验不过直接失败退出，不会装上被改动过的引擎。
+
+## 机器可读输出（`--json`）
+
+桌面 App 不解析终端文字，它靠 `--json` 输出的 NDJSON（一行一个 JSON 对象）驱动界面。
+脚本也可以用同一条流，不用再匹配中文或带颜色的进度行：
+
+```bash
+wxdl get links.txt --yes --json
+{"t":"run.start","id":"r-20261030-0712","cmd":"get","total":12,"out":"/Users/me/Downloads/wxdl","spec":""}
+{"t":"item.start","index":1,"total":12,"url":"https://weixin.qq.com/sph/…","title":"…"}
+{"t":"item.progress","index":1,"total":12,"pct":16,"bytes":4930212,"total_bytes":30200000,"status":"downloading"}
+{"t":"item.done","index":1,"path":"/Users/me/Downloads/wxdl/…mp4","bytes":30200000,"duration":"2:58","spec":"xWT111"}
+{"t":"item.skip","index":2,"reason":"already_downloaded","path":"…"}
+{"t":"run.done","ok":10,"failed":1,"skipped":1,"dir":"…","last_file":"…"}
+```
+
+约定：
+
+- 只有 `--json` 存在时 stdout 才是纯 JSON；`stderr` 仍保留给人看的错误文本，退出码语义不变。
+- 事件类型：`run.start` / `run.plan` / `env.check` / `auth.request` / `auth.done` /
+  `engine.install` / `wait.page` / `item.start` / `item.progress` / `item.done` /
+  `item.skip` / `item.fail` / `item.retry` / `run.progress` / `run.done` / `log` /
+  `error` / `status` / `doctor.done`。
+- `item.skip` 表示文件之前下过、直接复用，**不是失败**；`item.fail` 才计失败。
+- `error.code` 是稳定枚举（如 `page_not_connected`、`auth_cancelled`、`lock_held`），
+  界面按 code 选文案，不依赖中文。
+- 未知事件类型应忽略，这样 CLI 加新事件不会打断旧版 App。
+- `wxdl status --json` 输出一条 `status` 事件；`wxdl doctor --json` 逐项输出
+  `env.check`，最后一条是 `doctor.done`（`fails` 为未通过项数）。
+- `--wait-page=forever` 时 `wait.page` 的 `timeout` 为 `0`，表示不设上限。
 
 ## 运行时会发生什么
 
@@ -560,6 +609,78 @@ wxdl 会自动清掉那条失效记录并重新下载（引擎本身拒绝覆盖
 wxdl 本身只做编排：链接解析、批量调度、提权与恢复、原生弹窗、离线内置引擎。
 证书与私钥生成在 `~/.wxdl/work/certs/`（目录 0700、私钥 0600），不上传任何地方。
 
+## 技术栈与架构
+
+### 技术栈
+
+| 层 | 技术 | 说明 |
+| --- | --- | --- |
+| 命令行 | Go 1.23，仅标准库 | `go.mod` 没有任何第三方依赖；`CGO_ENABLED=0` 交叉编译出 arm64 / amd64 单文件 |
+| 桌面 App | SwiftUI + AppKit，Swift 5 | 部署目标 macOS 12；无第三方依赖；用 `Process` 调包内 `bin/wxdl`，只消费 `--json` 事件 |
+| 抓包引擎 | 上游 `wx_channels_download`（内置 SunnyNet） | 版本与 sha256 钉在 `packaging/upstream.env`，构建 / 安装 / 运行三级校验 |
+| 特权操作 | `osascript` + `networksetup` + `security` | 一次授权同时信任本机 CA、改系统代理；退出或失败自动恢复 |
+| 构建与打包 | Bash + `swiftc` + `iconutil` + `hdiutil` + ad-hoc `codesign` | 脚本在 `packaging/`；CI 在 macOS runner 上双架构交叉编译 |
+| 测试与 CI | `go test` + GitHub Actions | 单测不联网、不改系统设置；CI 额外校验上游包哈希 |
+| 本地存储 | `~/.wxdl/*.json` + 上游 SQLite `data.db` | 配置 0600、证书目录 0700；视频落到 `~/Downloads/wxdl` |
+
+这里没有自研算法，难点在**系统状态机**：代理快照与幂等恢复、证书信任、单实例锁，
+以及把上游引擎的能力包装成可批量、可恢复、可脚本化的一条链路。
+
+### 仓库结构
+
+```
+main.go                命令分发、参数解析、退出码
+gui/                   SwiftUI 桌面 App（纯 Swift，无 Xcode 工程）
+internal/
+  cfg/                 配置与 ~/.wxdl 目录布局、权限
+  events/              stdout 唯一写入口：人读文本 / --json NDJSON
+  flow/                端到端编排：锁 → 自检 → 冲突 → 授权 → 连接 → 批量 → 收尾
+  proxy/               系统代理与证书状态机（快照、恢复、幂等）
+  elevate/             osascript 一次授权
+  upstream/            引擎定位、下载、sha256 校验
+  server/              引擎本地 REST API + MCP 客户端
+  dialog/              原生弹窗（无 GUI 会话时降级到 stdin）
+  sysinfo/             只读探测：微信进程、代理现状、端口、证书信任
+packaging/             构建、打包、钉定上游版本、图标生成
+docs/                  GUI v2 设计与事件协议（gui-v2-design.md）
+```
+
+依赖方向是单向的：`main → flow → {cfg, events, proxy, upstream, elevate, server, dialog, sysinfo}`。
+`gui/` 不直接引用任何 Go 代码，只通过子进程、命令行参数和 NDJSON 事件与 CLI 通信。
+
+### 一次下载的数据流
+
+```
+wxdl.app / wxdl get / wxdl user
+  → 单实例锁 + 环境自检
+  → 引擎就绪（优先用内置 zip，逐个校验 sha256）
+  → 代理冲突检查 → 一次管理员授权（信任本机 CA + 指向 127.0.0.1:2023）
+  → 等视频号页面连上（--wait-page=forever 时无上限）
+  → 通过本地 REST/MCP 让上游引擎创建任务
+      SunnyNet 拦截微信 ↔ 腾讯的接口响应，拿到 decode_key
+  → 引擎解密落盘 mp4；wxdl 逐条发 item.progress / item.done / item.skip
+  → internal/events 把事件写成人类文本或 NDJSON
+  → 恢复代理、停引擎、释放锁（失败和 Ctrl-C 同样恢复）
+```
+
+GUI 与 CLI 走完全相同的链路：App 只是把用户输入换成命令参数，再把 NDJSON 事件还原成界面。
+
+### 对外接口
+
+- **CLI**：12 个子命令（见上）；下载类命令的退出码 `0` 至少一条成功 / `1` 全部失败或环境不对 /
+  `130` 被 Ctrl-C 中断。
+- **机器接口**：`--json` 的 NDJSON 事件流；事件类型与稳定错误码见上一节和
+  [docs/gui-v2-design.md](docs/gui-v2-design.md)。
+- **本地端口**：MITM 代理 `2023`、引擎 API `2022`，都只监听 `127.0.0.1`，不对局域网开放；没有公网服务端。
+
+### 关键设计
+
+- **单实例**：`flock ~/.wxdl/run/wxdl.lock`；只有持锁进程有权停引擎、恢复代理，避免两个进程互相拆台。
+- **恢复优先**：先快照原代理再动手；任何失败路径（含 Ctrl-C、`--keep` 中途停止）都把网络恢复原样。
+- **引擎可复现**：版本与 sha256 钉死，Release 包内置引擎，首装不联网；`update` 也先校验官方 checksums。
+- **UI 契约**：`--json` 是 App 的唯一输入，错误按稳定 code 选文案而不是匹配中文；新增事件对旧 App 向后兼容。
+- **本机 CA**：证书与私钥只在本机生成，不使用上游内置的公共测试密钥；`undo --cert` 按指纹精确删除。
+
 ## 和上游、res-downloader 是什么关系
 
 依赖链只有一条，**wxdl 只有一个上游**：
@@ -606,6 +727,20 @@ wxdl（本项目：批量/零配置/恢复保障）
 
 彻底清理：先 `wxdl undo --cert`，再删 `~/.wxdl`。
 
+### 配置文件
+
+`~/.wxdl/config.json`（首次运行自动生成，权限 0600，一般不用手改）：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `download_dir` | `~/Downloads/wxdl` | 视频保存目录 |
+| `ca_name` | `wxdl-local-ca` | 本机根证书的显示名 |
+| `proxy_port` | `2023` | MITM 代理端口 |
+| `api_port` | `2022` | 引擎本地 API 端口 |
+| `upstream_tag` | 空 | 空表示用编译时钉定的版本（当前 `v260907`）；`wxdl update --tag` 会写这里 |
+| `github_token` | 空 | 仅 `update --follow` / `doctor` 查询 Release 时用，缓解 GitHub API 限流 |
+| `cert_file` / `cert_key` | 自动写入 | 本机 CA 证书与私钥路径 |
+
 ## 开发与发布
 
 ```bash
@@ -620,18 +755,12 @@ go test ./...       # 纯逻辑单测，不联网、不改系统设置
 `package-gui.sh` 会交叉编译两个架构的 Go CLI 与 SwiftUI 外壳、生成图标、做 ad-hoc 签名，
 最后包成带「应用程序」快捷方式的 DMG。产物都在 `dist/`。
 
-代码分层：
+`go test` 覆盖事件协议、稳定错误码、规格解析与结果汇总，全部是纯逻辑测试，
+不联网、不改系统设置，可以在任何 macOS 上反复跑。
 
-- `gui/` SwiftUI 桌面 App：界面、任务列表、日志；实际动作用 `Process` 调包内 `bin/wxdl`
-- `packaging/gui/make-icon.swift` 用 AppKit 画图标并生成 `.icns`
-- `internal/cfg` 配置与目录布局（0700/0600 权限在这里集中落实）
-- `internal/upstream` 引擎下载、sha256 校验、Release 包内置发现
-- `internal/proxy` 系统代理与证书状态机（快照 / 恢复 / 幂等）
-- `internal/elevate` 一次管理员授权：`osascript` 提权脚本，失败即中断
-- `internal/flow` 端到端编排：单实例锁 → 自检 → 冲突处理 → 连接 → 批量任务 → 收尾
-- `internal/server` 引擎本地 REST API + MCP 客户端
-- `internal/dialog` 原生 macOS 弹窗（无 GUI 会话时自动降级到标准输入）
-- `internal/sysinfo` 只读探测：微信进程、代理现状、端口、证书信任
+模块职责、数据流与关键设计见 [技术栈与架构](#技术栈与架构)；
+桌面 App 的事件协议、P0 完成情况与 P1–P3 路线见
+[docs/gui-v2-design.md](docs/gui-v2-design.md)。
 
 **发布流程**：合到 `main` 后 `ci.yml` 会跑 gofmt/vet/test、双架构交叉编译、
 并重新校验 `packaging/upstream.env` 里钉定的上游包 sha256。打 tag 即自动出 Release：
